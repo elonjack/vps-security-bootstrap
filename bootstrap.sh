@@ -5,7 +5,8 @@ IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
 readonly CONF_DIR='/etc/vps-security'
-readonly SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
+readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
+readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
 readonly F2B_JAIL='/etc/fail2ban/jail.d/sshd-vps-security.local'
 readonly F2B_ACTION='/etc/fail2ban/action.d/vps-security-telegram.conf'
 readonly NOTIFIER='/usr/local/sbin/vps-security-notify'
@@ -14,6 +15,8 @@ SSH_PORT=52022
 ADMIN_USER=admin
 PUBLIC_KEY=''
 PUBLIC_KEY_FILE=''
+ADMIN_PASSWORD_FILE=''
+ALLOW_NOPASSWD_SUDO=0
 IGNORE_IP=''
 TELEGRAM_TOKEN=''
 TELEGRAM_CHAT_ID=''
@@ -36,10 +39,10 @@ usage() {
   --admin-user NAME            新建的唯一 SSH 管理用户，默认：admin
   --ssh-port PORT              SSH 端口，默认：52022
   --ignoreip CIDR[,CIDR...]    Fail2ban 永不封禁的可信 IP/CIDR（可选）
-  --telegram-token TOKEN       Telegram bot token（须同时提供 chat id）
-  --telegram-chat-id ID        Telegram chat/group id（须同时提供 token）
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
+  --admin-password-file PATH   管理员 sudo 密码的单行文件；除非显式允许免密 sudo，否则必填
+  --allow-nopasswd-sudo         允许管理员免密 sudo（不推荐；私钥失窃即获得 root）
   --permanent-bans             永久封禁（不推荐，默认逐级延长至 4 周）
   --no-rollback                不创建 10 分钟自动回滚保护（不推荐）
   -h, --help                   显示本帮助
@@ -53,11 +56,14 @@ while [ "$#" -gt 0 ]; do
   case "$1" in
     --public-key-file) need_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --public-key) need_value "$@"; PUBLIC_KEY=$2; shift 2 ;;
+    --admin-password-file) need_value "$@"; ADMIN_PASSWORD_FILE=$2; shift 2 ;;
+    --allow-nopasswd-sudo) ALLOW_NOPASSWD_SUDO=1; shift ;;
     --admin-user) need_value "$@"; ADMIN_USER=$2; shift 2 ;;
     --ssh-port) need_value "$@"; SSH_PORT=$2; shift 2 ;;
     --ignoreip) need_value "$@"; IGNORE_IP=$2; shift 2 ;;
-    --telegram-token) need_value "$@"; TELEGRAM_TOKEN=$2; shift 2 ;;
-    --telegram-chat-id) need_value "$@"; TELEGRAM_CHAT_ID=$2; shift 2 ;;
+    --telegram-token|--telegram-chat-id)
+      die '为避免 token 泄露到 shell 历史或进程参数，请使用 --telegram-token-file 和 --telegram-chat-id-file。'
+      ;;
     --telegram-token-file) need_value "$@"; TELEGRAM_TOKEN_FILE=$2; shift 2 ;;
     --telegram-chat-id-file) need_value "$@"; TELEGRAM_CHAT_ID_FILE=$2; shift 2 ;;
     --permanent-bans) BANTIME=-1; shift ;;
@@ -74,12 +80,18 @@ done
 [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$SSH_PORT" -le 65535 ] || die '--ssh-port 必须是 1–65535。'
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die '--admin-user 格式不正确。'
 [ -z "$PUBLIC_KEY" ] || [ -z "$PUBLIC_KEY_FILE" ] || die '只能使用一种公钥传入方式。'
-[ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_TOKEN_FILE" ] || die 'Telegram token 只能使用一种传入方式。'
-[ -z "$TELEGRAM_CHAT_ID" ] || [ -z "$TELEGRAM_CHAT_ID_FILE" ] || die 'Telegram chat id 只能使用一种传入方式。'
+[ -z "$ADMIN_PASSWORD_FILE" ] || [ -r "$ADMIN_PASSWORD_FILE" ] || die '无法读取管理员密码文件。'
+[ "$ALLOW_NOPASSWD_SUDO" -eq 1 ] || [ -n "$ADMIN_PASSWORD_FILE" ] || \
+  die '请使用 --admin-password-file 设置 sudo 密码；只有明确接受风险时才使用 --allow-nopasswd-sudo。'
 [ -z "$TELEGRAM_TOKEN_FILE" ] || { [ -r "$TELEGRAM_TOKEN_FILE" ] || die '无法读取 Telegram token 文件。'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
 [ -z "$TELEGRAM_CHAT_ID_FILE" ] || { [ -r "$TELEGRAM_CHAT_ID_FILE" ] || die '无法读取 Telegram chat id 文件。'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
 [ -n "$TELEGRAM_TOKEN" ] && [ -z "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
 [ -z "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
+
+if [ -n "$ADMIN_PASSWORD_FILE" ]; then
+  ADMIN_PASSWORD=$(head -n 1 "$ADMIN_PASSWORD_FILE")
+  [ -n "$ADMIN_PASSWORD" ] || die '管理员密码文件的第一行不能为空。'
+fi
 
 if [ -n "$PUBLIC_KEY_FILE" ]; then
   [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
@@ -87,7 +99,6 @@ if [ -n "$PUBLIC_KEY_FILE" ]; then
 fi
 [ -n "$PUBLIC_KEY" ] || die '请用 --public-key-file 提供 .pub 公钥。'
 printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
-command -v sshd >/dev/null 2>&1 || die '未找到 sshd；请先安装 openssh-server。'
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
@@ -96,6 +107,7 @@ mkdir -p "$BACKUP_DIR"
 chmod 700 "$CONF_DIR" "$BACKUP_DIR"
 backup_if_exists() { [ -e "$1" ] && cp -a "$1" "$BACKUP_DIR/$2" || true; }
 backup_if_exists "$SSH_DROPIN" ssh-dropin.before
+backup_if_exists "$LEGACY_SSH_DROPIN" ssh-dropin-legacy.before
 backup_if_exists /etc/pam.d/sshd pam-sshd.before
 backup_if_exists "$F2B_JAIL" fail2ban-jail.before
 backup_if_exists "$F2B_ACTION" fail2ban-action.before
@@ -103,7 +115,13 @@ backup_if_exists "$F2B_ACTION" fail2ban-action.before
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get install -y openssh-server fail2ban nftables curl sudo libpam-modules
+apt-get upgrade -y
+apt-get install -y openssh-server fail2ban nftables curl sudo libpam-modules unattended-upgrades
+command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
+cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+EOF
 
 info "创建/更新管理员用户：$ADMIN_USER"
 id "$ADMIN_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos '' "$ADMIN_USER"
@@ -116,15 +134,26 @@ touch "$USER_HOME/.ssh/authorized_keys"
 grep -Fqx "$PUBLIC_KEY" "$USER_HOME/.ssh/authorized_keys" || printf '%s\n' "$PUBLIC_KEY" >> "$USER_HOME/.ssh/authorized_keys"
 chown "$ADMIN_USER:$ADMIN_USER" "$USER_HOME/.ssh/authorized_keys"
 chmod 0600 "$USER_HOME/.ssh/authorized_keys"
+SUDO_RULE='ALL'
+if [ "$ALLOW_NOPASSWD_SUDO" -eq 1 ]; then
+  SUDO_RULE='NOPASSWD: ALL'
+fi
 cat > "/etc/sudoers.d/90-$APP-$ADMIN_USER" <<EOF
-# SSH 公钥持有者可以成为 root；不设置本地密码。
-$ADMIN_USER ALL=(ALL:ALL) NOPASSWD: ALL
+# 仅授予明确创建的管理员完整 sudo 权限。
+$ADMIN_USER ALL=(ALL:ALL) $SUDO_RULE
 EOF
 chmod 0440 "/etc/sudoers.d/90-$APP-$ADMIN_USER"
 visudo -cf "/etc/sudoers.d/90-$APP-$ADMIN_USER" >/dev/null
+if [ "$ALLOW_NOPASSWD_SUDO" -eq 0 ]; then
+  printf '%s:%s\n' "$ADMIN_USER" "$ADMIN_PASSWORD" | chpasswd
+  unset ADMIN_PASSWORD
+fi
 
 info '写入 SSH 加固配置（只管理自己的 drop-in 文件）'
 install -d -m 0755 /etc/ssh/sshd_config.d
+# 旧版本使用 99- 前缀。OpenSSH 对大多数单值配置采用首次读取的值，
+# 因此先移除本工具旧文件，再以 00- 前缀写入当前策略。
+rm -f "$LEGACY_SSH_DROPIN"
 cat > "$SSH_DROPIN" <<EOF
 # Managed by $APP.
 Port $SSH_PORT
@@ -157,10 +186,29 @@ LogLevel VERBOSE
 EOF
 chmod 0644 "$SSH_DROPIN"
 
-info '校验 SSH 配置'
+info '校验 SSH 配置及最终生效策略'
 sshd -t
-PORTS=$(sshd -T | awk '$1 == "port" {print $2}')
-[ "$PORTS" = "$SSH_PORT" ] || die "SSH 实际端口并非唯一的 $SSH_PORT（得到：$PORTS）；脚本没有重载 SSH。"
+sshd_effective() {
+  sshd -T | awk -v key="$1" '$1 == key { $1=""; sub(/^ /, ""); print }'
+}
+assert_sshd_single_value() {
+  local key=$1 expected=$2 actual count
+  actual=$(sshd_effective "$key")
+  count=$(printf '%s\n' "$actual" | sed '/^$/d' | wc -l)
+  [ "$count" -eq 1 ] && [ "$actual" = "$expected" ] || \
+    die "SSH 最终配置 $key 应为 '$expected'，实际为 '${actual:-<未设置>}'；脚本没有重载 SSH。"
+}
+assert_sshd_single_value port "$SSH_PORT"
+assert_sshd_single_value permitrootlogin no
+assert_sshd_single_value allowusers "$ADMIN_USER"
+assert_sshd_single_value pubkeyauthentication yes
+assert_sshd_single_value authenticationmethods publickey
+assert_sshd_single_value passwordauthentication no
+assert_sshd_single_value kbdinteractiveauthentication no
+assert_sshd_single_value allowtcpforwarding no
+assert_sshd_single_value allowagentforwarding no
+assert_sshd_single_value x11forwarding no
+assert_sshd_single_value permittunnel no
 
 if [ "$SCHEDULE_ROLLBACK" -eq 1 ]; then
   info "创建 $ROLLBACK_SECONDS 秒自动回滚保护"
@@ -172,14 +220,21 @@ if [ -e '$BACKUP_DIR/ssh-dropin.before' ]; then
 else
   rm -f '$SSH_DROPIN'
 fi
+if [ -e '$BACKUP_DIR/ssh-dropin-legacy.before' ]; then
+  cp -a '$BACKUP_DIR/ssh-dropin-legacy.before' '$LEGACY_SSH_DROPIN'
+else
+  rm -f '$LEGACY_SSH_DROPIN'
+fi
 sshd -t && systemctl reload ssh
 EOF
   chmod 0700 "$ROLLBACK_SCRIPT"
-  systemd-run --quiet --unit=vps-security-ssh-rollback --on-active="$ROLLBACK_SECONDS"s "$ROLLBACK_SCRIPT"
+  ROLLBACK_UNIT="vps-security-ssh-rollback-$STAMP"
+  systemd-run --quiet --unit="$ROLLBACK_UNIT" --on-active="$ROLLBACK_SECONDS"s "$ROLLBACK_SCRIPT"
   cat > "$CONFIRM" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-systemctl cancel vps-security-ssh-rollback.service 2>/dev/null || true
+systemctl stop '$ROLLBACK_UNIT.timer' '$ROLLBACK_UNIT.service' 2>/dev/null || true
+systemctl reset-failed '$ROLLBACK_UNIT.timer' '$ROLLBACK_UNIT.service' 2>/dev/null || true
 rm -f '$ROLLBACK_SCRIPT' "\$0"
 echo 'SSH 配置已确认，自动回滚已取消。'
 EOF
