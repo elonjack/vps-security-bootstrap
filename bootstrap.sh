@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Debian 13 SSH hardening + Fail2ban + optional Telegram notifications.
+# Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
 set -Eeuo pipefail
 IFS=$'\n\t'
 
@@ -11,6 +11,7 @@ readonly F2B_JAIL='/etc/fail2ban/jail.d/sshd-vps-security.local'
 readonly F2B_ACTION='/etc/fail2ban/action.d/vps-security-telegram.conf'
 readonly NOTIFIER='/usr/local/sbin/vps-security-notify'
 readonly CONFIRM='/usr/local/sbin/vps-security-confirm'
+readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/52-vps-security-bootstrap-auto-upgrades'
 SSH_PORT=52022
 ADMIN_USER=admin
 PUBLIC_KEY=''
@@ -25,6 +26,7 @@ TELEGRAM_CHAT_ID_FILE=''
 BANTIME=1d
 ROLLBACK_SECONDS=600
 SCHEDULE_ROLLBACK=1
+SYSTEM_UPGRADE=1
 
 usage() {
   cat <<'EOF'
@@ -41,9 +43,10 @@ usage() {
   --ignoreip CIDR[,CIDR...]    Fail2ban 永不封禁的可信 IP/CIDR（可选）
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
-  --admin-password-file PATH   管理员 sudo 密码的单行文件；除非显式允许免密 sudo，否则必填
+  --admin-password-file PATH   自动化运行时从单行文件读取管理员 sudo 密码
   --allow-nopasswd-sudo         允许管理员免密 sudo（不推荐；私钥失窃即获得 root）
   --permanent-bans             永久封禁（不推荐，默认逐级延长至 4 周）
+  --skip-system-upgrade        跳过本次 apt upgrade（不推荐；仍安装所需软件包）
   --no-rollback                不创建 10 分钟自动回滚保护（不推荐）
   -h, --help                   显示本帮助
 EOF
@@ -67,6 +70,7 @@ while [ "$#" -gt 0 ]; do
     --telegram-token-file) need_value "$@"; TELEGRAM_TOKEN_FILE=$2; shift 2 ;;
     --telegram-chat-id-file) need_value "$@"; TELEGRAM_CHAT_ID_FILE=$2; shift 2 ;;
     --permanent-bans) BANTIME=-1; shift ;;
+    --skip-system-upgrade) SYSTEM_UPGRADE=0; shift ;;
     --no-rollback) SCHEDULE_ROLLBACK=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（使用 --help 查看用法）" ;;
@@ -74,31 +78,51 @@ while [ "$#" -gt 0 ]; do
 done
 
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
-[ -r /etc/debian_version ] || die '此脚本仅面向 Debian 13。'
+[ -r /etc/debian_version ] || die '此脚本仅面向 Debian 12 或 13。'
 . /etc/os-release
-[ "$ID" = debian ] && [ "$VERSION_ID" = 13 ] || die '此脚本仅支持 Debian 13。'
+[ "$ID" = debian ] || die '此脚本仅支持 Debian。'
+case "${VERSION_ID%%.*}" in
+  12|13) ;;
+  *) die '此脚本仅支持 Debian 12 或 13。' ;;
+esac
+[ -d /run/systemd/system ] || die '此脚本需要 systemd。'
 [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$SSH_PORT" -le 65535 ] || die '--ssh-port 必须是 1–65535。'
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die '--admin-user 格式不正确。'
 [ -z "$PUBLIC_KEY" ] || [ -z "$PUBLIC_KEY_FILE" ] || die '只能使用一种公钥传入方式。'
-[ -z "$ADMIN_PASSWORD_FILE" ] || [ -r "$ADMIN_PASSWORD_FILE" ] || die '无法读取管理员密码文件。'
-[ "$ALLOW_NOPASSWD_SUDO" -eq 1 ] || [ -n "$ADMIN_PASSWORD_FILE" ] || \
-  die '请使用 --admin-password-file 设置 sudo 密码；只有明确接受风险时才使用 --allow-nopasswd-sudo。'
-[ -z "$TELEGRAM_TOKEN_FILE" ] || { [ -r "$TELEGRAM_TOKEN_FILE" ] || die '无法读取 Telegram token 文件。'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
-[ -z "$TELEGRAM_CHAT_ID_FILE" ] || { [ -r "$TELEGRAM_CHAT_ID_FILE" ] || die '无法读取 Telegram chat id 文件。'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
+require_root_private_file() {
+  local path=$1 label=$2 owner mode
+  [ -f "$path" ] && [ -r "$path" ] || die "无法读取 $label 文件：$path"
+  owner=$(stat -c '%u' "$path")
+  mode=$(stat -c '%a' "$path")
+  [ "$owner" -eq 0 ] || die "$label 文件必须由 root 所有：$path"
+  (( (8#$mode & 077) == 0 )) || die "$label 文件权限必须是 0600 或更严格：$path"
+}
+[ -z "$ADMIN_PASSWORD_FILE" ] || require_root_private_file "$ADMIN_PASSWORD_FILE" '管理员密码'
+[ -z "$TELEGRAM_TOKEN_FILE" ] || { require_root_private_file "$TELEGRAM_TOKEN_FILE" 'Telegram token'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
+[ -z "$TELEGRAM_CHAT_ID_FILE" ] || { require_root_private_file "$TELEGRAM_CHAT_ID_FILE" 'Telegram chat id'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
 [ -n "$TELEGRAM_TOKEN" ] && [ -z "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
 [ -z "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
 
 if [ -n "$ADMIN_PASSWORD_FILE" ]; then
   ADMIN_PASSWORD=$(head -n 1 "$ADMIN_PASSWORD_FILE")
   [ -n "$ADMIN_PASSWORD" ] || die '管理员密码文件的第一行不能为空。'
+elif [ "$ALLOW_NOPASSWD_SUDO" -eq 0 ]; then
+  [ -t 0 ] || die '非交互运行时请使用 --admin-password-file，或明确传入 --allow-nopasswd-sudo。'
+  read -rsp "为 $ADMIN_USER 设置 sudo 密码（不会用于 SSH 登录）：" ADMIN_PASSWORD
+  printf '\n'
+  read -rsp '再次输入 sudo 密码：' ADMIN_PASSWORD_CONFIRM
+  printf '\n'
+  [ -n "$ADMIN_PASSWORD" ] || die 'sudo 密码不能为空。'
+  [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ] || die '两次输入的 sudo 密码不一致。'
+  unset ADMIN_PASSWORD_CONFIRM
 fi
+[ "$ALLOW_NOPASSWD_SUDO" -eq 1 ] || [[ "$ADMIN_PASSWORD" != *:* ]] || die 'sudo 密码不能包含冒号。'
 
 if [ -n "$PUBLIC_KEY_FILE" ]; then
   [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
   PUBLIC_KEY=$(grep -E '^(ssh-(ed25519|rsa|ecdsa)|sk-ssh-ed25519)' "$PUBLIC_KEY_FILE" | head -n 1 || true)
 fi
 [ -n "$PUBLIC_KEY" ] || die '请用 --public-key-file 提供 .pub 公钥。'
-printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
@@ -115,10 +139,12 @@ backup_if_exists "$F2B_ACTION" fail2ban-action.before
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
-apt-get upgrade -y
+[ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get upgrade -y
 apt-get install -y openssh-server fail2ban nftables curl sudo libpam-modules unattended-upgrades
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
-cat > /etc/apt/apt.conf.d/20auto-upgrades <<'EOF'
+command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
+printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
+cat > "$AUTO_UPGRADES_CONF" <<'EOF'
 APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
