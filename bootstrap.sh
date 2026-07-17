@@ -1,3 +1,6 @@
+Exit code: 0
+Wall time: 0.4 seconds
+Output:
 #!/usr/bin/env bash
 # Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
 set -Eeuo pipefail
@@ -33,8 +36,8 @@ ORIGINAL_ARGC=$#
 
 if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
   STYLE_RESET=$'\033[0m'
-  STYLE_TITLE=$'\033[1;36m'
-  STYLE_NUMBER=$'\033[1;32m'
+  STYLE_TITLE=$'\033[1;33m'
+  STYLE_NUMBER=$'\033[1;33m'
   STYLE_DIM=$'\033[2m'
 else
   STYLE_RESET=''
@@ -136,18 +139,18 @@ menu_option() {
 
 print_banner() {
   local -a logo=(
-    '██╗   ██╗██████╗ ███████╗'
-    '██║   ██║██╔══██╗██╔════╝'
-    '██║   ██║██████╔╝███████╗'
-    '╚██╗ ██╔╝██╔═══╝ ╚════██║'
-    ' ╚████╔╝ ██║     ███████║'
-    '  ╚═══╝  ╚═╝     ╚══════╝'
+    '██████╗ ██╗██╗  ██╗ █████╗  ██████╗██╗  ██╗██╗   ██╗'
+    '██╔══██╗██║██║ ██╔╝██╔══██╗██╔════╝██║  ██║██║   ██║'
+    '██████╔╝██║█████╔╝ ███████║██║     ███████║██║   ██║'
+    '██╔═══╝ ██║██╔═██╗ ██╔══██║██║     ██╔══██║██║   ██║'
+    '██║     ██║██║  ██╗██║  ██║╚██████╗██║  ██║╚██████╔╝'
+    '╚═╝     ╚═╝╚═╝  ╚═╝╚═╝  ╚═╝ ╚═════╝╚═╝  ╚═╝ ╚═════╝'
   )
   local line
   for line in "${logo[@]}"; do
     printf '%b%s%b\n' "$STYLE_TITLE" "$line" "$STYLE_RESET"
   done
-  printf '%bVPS SECURITY BOOTSTRAP · DEBIAN 12 / 13%b\n' "$STYLE_DIM" "$STYLE_RESET"
+  printf '%bPIKACHU SECURITY BOOTSTRAP · DEBIAN 12 / 13%b\n' "$STYLE_TITLE" "$STYLE_RESET"
 }
 
 detect_current_ssh_port() {
@@ -646,3 +649,4 @@ EOF
 echo '本工具不创建 SSH 自动回滚；新连接验证成功前，请保持当前 SSH 窗口打开。'
 [ -n "$TELEGRAM_TOKEN" ] && echo "Telegram 已启用：通知将以“$TELEGRAM_VPS_NAME”显示，请确保该聊天仅对可信成员开放。"
 echo '注意：请在云厂商安全组/防火墙中先放行新的 SSH 端口。'
+
