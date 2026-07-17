@@ -28,6 +28,7 @@ BANTIME=1d
 SYSTEM_UPGRADE=1
 INTERACTIVE=0
 INTERACTIVE_FLAG=0
+ROTATE_TELEGRAM=0
 ORIGINAL_ARGC=$#
 
 usage() {
@@ -35,6 +36,9 @@ usage() {
 
 普通用法（推荐，逐项填写）：
   sudo bash bootstrap.sh
+
+仅更换 Telegram Bot Token（不修改 SSH、公钥或 Fail2ban 策略）：
+  sudo bash bootstrap.sh --rotate-telegram-token
 
 自动化用法（传入参数，不进入向导）：
 EOF
@@ -55,6 +59,7 @@ EOF
   --telegram-vps-name NAME     Telegram 中显示的 VPS 名称（默认：主机名）
   --permanent-bans             SSH jail 永久封禁（默认逐级延长至 4 周）
   --skip-system-upgrade        跳过本次 apt upgrade（不推荐；仍安装所需软件包）
+  --rotate-telegram-token      交互式更换 Telegram Token，不修改 SSH 或 Fail2ban 策略
   -h, --help                   显示本帮助
 EOF
 }
@@ -77,6 +82,7 @@ while [ "$#" -gt 0 ]; do
     --telegram-vps-name) need_value "$@"; TELEGRAM_VPS_NAME=$2; shift 2 ;;
     --permanent-bans) BANTIME=-1; shift ;;
     --skip-system-upgrade) SYSTEM_UPGRADE=0; shift ;;
+    --rotate-telegram-token) ROTATE_TELEGRAM=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（使用 --help 查看用法）" ;;
   esac
@@ -133,8 +139,30 @@ interactive_wizard() {
   clear 2>/dev/null || true
   cat <<'EOF'
 ========================================
- Debian VPS 安全初始化向导（Debian 12 / 13）
+ Debian VPS 安全管理向导（Debian 12 / 13）
 ========================================
+EOF
+  if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
+    echo
+    echo '请选择操作：'
+    echo '  1) 初次部署 / 重新加固 SSH'
+    echo '     会覆盖 root 公钥、更新 SSH 和 Fail2ban 配置。'
+    echo '  2) 更换 Telegram Bot Token'
+    echo '     不修改 SSH、公钥、端口或 Fail2ban 封禁策略。'
+    echo '  0) 退出，不做任何修改'
+    while true; do
+      read -r -p '请输入 1、2 或 0：' answer
+      case "$answer" in
+        1) break ;;
+        2) ROTATE_TELEGRAM=1; break ;;
+        0) exit 0 ;;
+        *) echo '请输入 1、2 或 0。' ;;
+      esac
+    done
+  fi
+  [ "$ROTATE_TELEGRAM" -eq 0 ] || return 0
+  cat <<'EOF'
+
 将保留 root 作为唯一 SSH 用户，只允许你本次提供的 SSH 公钥登录，
 关闭 SSH 密码登录，启用 Fail2ban 和可选 Telegram 通知。
 本向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
@@ -205,6 +233,82 @@ require_root_private_file() {
   (( (8#$mode & 077) == 0 )) || die "$label 文件权限必须是 0600 或更严格：$path"
 }
 
+validate_telegram_settings() {
+  [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
+  [[ "$TELEGRAM_TOKEN" == *:* && "$TELEGRAM_TOKEN" != *$'\n'* && "$TELEGRAM_TOKEN" != *$'\r'* && "$TELEGRAM_TOKEN" != *[[:space:]]* ]] || \
+    die 'Telegram Token 格式无效；请粘贴 BotFather 返回的完整 Token。'
+  [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || die 'Telegram Chat ID 必须是数字；群组 Chat ID 可以是负数。'
+  [ -z "$TELEGRAM_VPS_NAME" ] || [[ "$TELEGRAM_VPS_NAME" != *$'\n'* && "$TELEGRAM_VPS_NAME" != *$'\r'* && ${#TELEGRAM_VPS_NAME} -le 80 ]] || die 'Telegram VPS 名称不能包含换行，且最多 80 个字符。'
+}
+
+write_telegram_env() {
+  local temporary
+  install -d -o root -g root -m 0700 "$CONF_DIR"
+  temporary=$(mktemp "$CONF_DIR/telegram.env.XXXXXX") || die '无法创建 Telegram 临时配置文件。'
+  printf 'TELEGRAM_BOT_TOKEN=%q\nTELEGRAM_CHAT_ID=%q\nTELEGRAM_VPS_NAME=%q\n' \
+    "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_ID" "$TELEGRAM_VPS_NAME" > "$temporary"
+  chown root:root "$temporary"
+  chmod 0600 "$temporary"
+  mv -f "$temporary" "$CONF_DIR/telegram.env"
+}
+
+send_telegram_rotation_test() {
+  local host now text
+  host=$(hostname -f 2>/dev/null || hostname)
+  now=$(date -u '+%Y-%m-%d %H:%M:%SZ')
+  printf -v text '✅ Telegram Token 已更新\nVPS：%s\n主机：%s\n时间：%s' \
+    "$TELEGRAM_VPS_NAME" "$host" "$now"
+  curl --silent --show-error --fail --connect-timeout 3 --max-time 8 \
+    --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
+    --data-urlencode "text=$text" \
+    "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" >/dev/null
+}
+
+rotate_telegram_token() {
+  local old_chat_id old_vps_name answer
+  [ -f "$CONF_DIR/telegram.env" ] || die '未找到现有 Telegram 配置；请先选择“初次部署 / 重新加固 SSH”启用 Telegram 通知。'
+  [ -x "$NOTIFIER" ] || die '未找到 Telegram 通知程序；请先选择“初次部署 / 重新加固 SSH”重新写入通知配置。'
+  require_root_private_file "$CONF_DIR/telegram.env" 'Telegram 配置'
+  source "$CONF_DIR/telegram.env"
+  old_chat_id=${TELEGRAM_CHAT_ID:-}
+  old_vps_name=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
+  [ -n "$old_chat_id" ] || die '现有 Telegram 配置缺少 Chat ID；请重新执行初次部署。'
+
+  cat <<'EOF'
+
+Telegram Token 更换：
+  1. 在 Telegram 搜索 @BotFather，使用 /revoke 使旧 Token 失效并取得新 Token。
+  2. 下方粘贴新 Token 后，终端不会显示字符、星号或长度；这是正常的安全保护。
+  3. 如果仍使用同一个机器人，Chat ID 通常无需变更。
+
+此操作只更新 Telegram 配置并发送测试通知；不会修改 SSH、公钥、端口、Fail2ban 或系统软件包。
+EOF
+  read -rsp '新的 Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：' TELEGRAM_TOKEN
+  printf '\n'
+  if ask_yes_no "保留原 Chat ID（$old_chat_id）？" y; then
+    TELEGRAM_CHAT_ID=$old_chat_id
+  else
+    read -r -p '新的 Telegram Chat ID：' TELEGRAM_CHAT_ID
+  fi
+  prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称（直接回车保留原名称）' "$old_vps_name"
+  validate_telegram_settings
+
+  echo
+  echo '即将更新 Telegram 配置：'
+  echo "  Chat ID：$TELEGRAM_CHAT_ID"
+  echo "  VPS 名称：$TELEGRAM_VPS_NAME"
+  echo '  SSH、公钥、端口、Fail2ban 策略：不修改'
+  read -r -p '确认更新并发送测试通知请输入 YES：' answer
+  [ "$answer" = YES ] || die '已取消，Telegram 配置未修改。'
+
+  write_telegram_env
+  if send_telegram_rotation_test; then
+    echo 'Telegram Token 已更新，测试通知已发送。'
+  else
+    echo '警告：新 Token 已保存，但测试通知发送失败。请检查 Token、Chat ID、网络或机器人是否已点击 Start。' >&2
+  fi
+}
+
 validate_ignore_ip() {
   local entry
   local -a entries
@@ -224,19 +328,27 @@ validate_ignore_ip() {
   done
 }
 
+[ "$ROTATE_TELEGRAM" -eq 0 ] || {
+  rotate_telegram_token
+  exit 0
+}
+
 validate_ignore_ip
 [ -z "$TELEGRAM_TOKEN_FILE" ] || { require_root_private_file "$TELEGRAM_TOKEN_FILE" 'Telegram token'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
 [ -z "$TELEGRAM_CHAT_ID_FILE" ] || { require_root_private_file "$TELEGRAM_CHAT_ID_FILE" 'Telegram chat id'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
 [ -n "$TELEGRAM_TOKEN" ] && [ -z "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
 [ -z "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
-[ -z "$TELEGRAM_TOKEN" ] || TELEGRAM_VPS_NAME=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
-[ -z "$TELEGRAM_VPS_NAME" ] || [[ "$TELEGRAM_VPS_NAME" != *$'\n'* && "$TELEGRAM_VPS_NAME" != *$'\r'* && ${#TELEGRAM_VPS_NAME} -le 80 ]] || die 'Telegram VPS 名称不能包含换行，且最多 80 个字符。'
+if [ -n "$TELEGRAM_TOKEN" ]; then
+  TELEGRAM_VPS_NAME=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
+  validate_telegram_settings
+fi
 
 if [ -n "$PUBLIC_KEY_FILE" ]; then
   [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
   PUBLIC_KEY=$(grep -E '^(ssh-(ed25519|rsa|ecdsa)|sk-ssh-ed25519)' "$PUBLIC_KEY_FILE" | head -n 1 || true)
 fi
 [ -n "$PUBLIC_KEY" ] || die '请粘贴或通过 --public-key-file 提供 .pub 公钥。'
+[[ "$PUBLIC_KEY" != *$'\n'* && "$PUBLIC_KEY" != *$'\r'* ]] || die 'SSH 公钥只能是一行；请只粘贴 .pub 文件中的一整行。'
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
@@ -350,9 +462,7 @@ systemctl reload ssh
 
 info '写入 Fail2ban 配置（systemd journal + nftables）'
 if [ -n "$TELEGRAM_TOKEN" ]; then
-  printf 'TELEGRAM_BOT_TOKEN=%q\nTELEGRAM_CHAT_ID=%q\nTELEGRAM_VPS_NAME=%q\n' \
-    "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_ID" "$TELEGRAM_VPS_NAME" > "$CONF_DIR/telegram.env"
-  chmod 0600 "$CONF_DIR/telegram.env"
+  write_telegram_env
   cat > "$NOTIFIER" <<'EOF'
 #!/usr/bin/env bash
 set -eo pipefail
