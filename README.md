@@ -26,19 +26,6 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/do
 
 以后若发布 `v1.0.2`，想固定使用新版时，只需把命令中的 `v1.0.1` 改为 `v1.0.2`。
 
-## SHA-256 校验（高级，可选）
-
-如果你需要记录或审计下载文件，可在固定版本命令前执行以下校验：
-
-```bash
-VERSION='v1.0.1'
-curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh"
-curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh.sha256"
-sha256sum -c bootstrap.sh.sha256
-bash bootstrap.sh
-```
-
-校验输出必须为 `bootstrap.sh: OK`。此方式适合需要审计或明确固定版本的场景。
 
 ## 如何准备并粘贴公钥
 
