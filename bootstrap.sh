@@ -134,37 +134,6 @@ menu_option() {
   printf '\n'
 }
 
-terminal_columns() {
-  local columns
-  columns=$(tput cols 2>/dev/null || true)
-  [[ "$columns" =~ ^[0-9]+$ ]] && [ "$columns" -ge 40 ] || columns=${COLUMNS:-80}
-  printf '%s' "$columns"
-}
-
-center_banner_line() {
-  local line=$1 columns visible=0 padding character index
-  columns=$(terminal_columns)
-  for ((index = 0; index < ${#line}; index++)); do
-    character=${line:index:1}
-    if [ "$character" = ' ' ]; then
-      visible=$((visible + 1))
-    else
-      visible=$((visible + 2))
-    fi
-  done
-  padding=$(( (columns - visible) / 2 ))
-  [ "$padding" -ge 0 ] || padding=0
-  printf '%*s%b%s%b\n' "$padding" '' "$STYLE_TITLE" "$line" "$STYLE_RESET"
-}
-
-center_ascii_line() {
-  local line=$1 style=$2 columns padding
-  columns=$(terminal_columns)
-  padding=$(( (columns - ${#line}) / 2 ))
-  [ "$padding" -ge 0 ] || padding=0
-  printf '%*s%b%s%b\n' "$padding" '' "$style" "$line" "$STYLE_RESET"
-}
-
 print_banner() {
   local -a logo=(
     '██╗   ██╗██████╗ ███████╗'
@@ -176,9 +145,9 @@ print_banner() {
   )
   local line
   for line in "${logo[@]}"; do
-    center_banner_line "$line"
+    printf '%b%s%b\n' "$STYLE_TITLE" "$line" "$STYLE_RESET"
   done
-  center_ascii_line 'VPS SECURITY BOOTSTRAP · DEBIAN 12 / 13' "$STYLE_DIM"
+  printf '%bVPS SECURITY BOOTSTRAP · DEBIAN 12 / 13%b\n' "$STYLE_DIM" "$STYLE_RESET"
 }
 
 detect_current_ssh_port() {
