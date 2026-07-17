@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 0.5 seconds
+Wall time: 0.4 seconds
 Output:
 #!/usr/bin/env bash
 # Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
@@ -205,7 +205,7 @@ interactive_wizard() {
 注意：
   1. 只保留 root 作为 SSH 用户，并且只允许本次提供的 SSH 公钥登录。
   2. SSH 密码登录会关闭，同时启用 Fail2ban 和可选的 Telegram 通知。
-  3. 向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
+  3. 向导会先收集你的选择；只有最后确认后才会开始修改系统。
   4. 请保持当前 SSH 窗口打开，直到新的 SSH 连接验证成功。
   5. 请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，再粘贴到下方。
   6. 公钥文件通常位于：
@@ -226,21 +226,19 @@ EOF
     ask_yes_no '已确认新端口已放行吗？' n || die '已取消；请先放行新端口后再运行。'
   fi
   prompt_default IGNORE_IP 'Fail2ban 白名单 IP/CIDR（直接回车：不添加公网白名单）' ''
-  prompt_line '提示：白名单只是不被 Fail2ban 封禁；正确的 SSH 私钥登录无需加入白名单也可正常使用。'
-  prompt_line '提示：系统更新会在最后输入 YES 后才执行；现在仅记录你的选择，尚未修改系统。'
+  prompt_line '提示：正确的 SSH 私钥登录无需加入白名单；所有选择会在最后确认后才开始执行。'
   if ask_yes_no '执行 apt update 和 apt upgrade，安装可用的软件更新？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
   if ask_yes_no '启用 Telegram 登录/封禁通知？' n; then
     prompt_block <<'EOF'
-注意：Telegram 配置步骤如下。
+Telegram 配置：
   1. 在 Telegram 搜索 @BotFather，发送 /newbot 并按提示创建机器人。
   2. 复制 BotFather 返回的 HTTP API Token；该 Token 相当于机器人密码，不要发送给他人。
   3. 打开你创建的机器人，点击 Start 并发送任意一条消息。
   4. 在可信设备的浏览器访问：
      https://api.telegram.org/bot<你的Token>/getUpdates
      在返回内容中找到 message.chat.id，并复制对应的数字作为 Chat ID。
-  5. 下方粘贴 Token 后，屏幕不会显示字符、星号或长度；这是正常的安全保护。
-     粘贴完成直接按回车即可。Chat ID 可以正常粘贴和显示。
 EOF
+    prompt_line '提示：粘贴 Bot Token 后屏幕不会显示字符、星号或长度；这是正常保护，直接按回车即可。'
     read -rsp "${STYLE_PROMPT}Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：${STYLE_RESET}" TELEGRAM_TOKEN
     printf '\n'
     read -r -p "${STYLE_PROMPT}Telegram Chat ID：${STYLE_RESET}" TELEGRAM_CHAT_ID
@@ -248,17 +246,16 @@ EOF
     prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称' "$(hostname -f 2>/dev/null || hostname)"
   fi
   prompt_block <<EOF
-注意：即将应用以下设置。
+配置摘要：
   1. SSH 用户：root（仅本次提供的 SSH 公钥登录；旧公钥将失效）
   2. SSH 端口：$SSH_PORT
   3. Fail2ban 白名单：${IGNORE_IP:-未设置（不额外白名单公网 IP）}
-  4. Fail2ban 策略：10 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口
+  4. Fail2ban 策略：3 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口
   5. 系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)
   6. Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)
 EOF
   [ -z "$TELEGRAM_TOKEN" ] || prompt_line "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
-  read -r -p "${STYLE_PROMPT}确认开始请输入 YES：${STYLE_RESET}" answer
-  [ "$answer" = YES ] || die '已取消，未修改系统。'
+  ask_yes_no '确认执行以上配置？' n || die '已取消，未修改系统。'
 }
 
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
@@ -304,7 +301,7 @@ write_telegram_env() {
 send_telegram_rotation_test() {
   local host now text
   host=$(hostname -f 2>/dev/null || hostname)
-  now=$(date -u '+%Y-%m-%d %H:%M:%SZ')
+  now=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S 北京时间 (UTC+8)')
   printf -v text '✅ Telegram Token 已更新\nVPS：%s\n主机：%s\n时间：%s' \
     "$TELEGRAM_VPS_NAME" "$host" "$now"
   curl --silent --show-error --fail --connect-timeout 3 --max-time 8 \
@@ -348,8 +345,7 @@ EOF
   2. VPS 名称：$TELEGRAM_VPS_NAME
   3. SSH、公钥、端口、Fail2ban 策略：不修改
 EOF
-  read -r -p "${STYLE_PROMPT}确认更新并发送测试通知请输入 YES：${STYLE_RESET}" answer
-  [ "$answer" = YES ] || die '已取消，Telegram 配置未修改。'
+  ask_yes_no '确认更新并发送测试通知？' n || die '已取消，Telegram 配置未修改。'
 
   write_telegram_env
   if send_telegram_rotation_test; then
@@ -567,7 +563,7 @@ CURL_CONFIG_EOF
 }
 event=$1
 host=$(hostname -f 2>/dev/null || hostname)
-now=$(date -u '+%Y-%m-%d %H:%M:%SZ')
+now=$(date -u -d '+8 hours' '+%Y-%m-%d %H:%M:%S 北京时间 (UTC+8)')
 name=$(html_escape "$TELEGRAM_VPS_NAME")
 host=$(html_escape "$host")
 case "$event" in
@@ -622,7 +618,7 @@ cat > "$F2B_JAIL" <<EOF
 backend = systemd
 usedns = no
 bantime = $BANTIME
-findtime = 10m
+findtime = 3m
 maxretry = 3
 bantime.increment = true
 bantime.factor = 2
