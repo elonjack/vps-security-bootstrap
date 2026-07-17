@@ -39,12 +39,14 @@ if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR
   STYLE_TITLE=$'\033[1;36m'
   STYLE_NUMBER=$'\033[1;33m'
   STYLE_MENU=$'\033[1;33m'
+  STYLE_PROMPT=$'\033[1;33m'
   STYLE_DIM=$'\033[2m'
 else
   STYLE_RESET=''
   STYLE_TITLE=''
   STYLE_NUMBER=''
   STYLE_MENU=''
+  STYLE_PROMPT=''
   STYLE_DIM=''
 fi
 
@@ -110,7 +112,7 @@ done
 
 prompt_default() {
   local variable=$1 prompt=$2 default=$3 value
-  read -r -p "$prompt [$default]: " value
+  read -r -p "${STYLE_PROMPT}${prompt} [$default]: ${STYLE_RESET}" value
   printf -v "$variable" '%s' "${value:-$default}"
 }
 
@@ -118,10 +120,10 @@ ask_yes_no() {
   local prompt=$1 default=${2:-y} answer
   while true; do
     if [ "$default" = y ]; then
-      read -r -p "$prompt [Y/n]: " answer
+      read -r -p "${STYLE_PROMPT}${prompt} [Y/n]: ${STYLE_RESET}" answer
       answer=${answer:-y}
     else
-      read -r -p "$prompt [y/N]: " answer
+      read -r -p "${STYLE_PROMPT}${prompt} [y/N]: ${STYLE_RESET}" answer
       answer=${answer:-n}
     fi
     case "$answer" in
@@ -130,6 +132,16 @@ ask_yes_no() {
       *) echo '请输入 y 或 n。' ;;
     esac
   done
+}
+
+prompt_line() {
+  printf '%b%s%b\n' "$STYLE_PROMPT" "$*" "$STYLE_RESET"
+}
+
+prompt_block() {
+  printf '\n%b' "$STYLE_PROMPT"
+  cat
+  printf '%b' "$STYLE_RESET"
 }
 
 menu_option() {
@@ -164,12 +176,16 @@ detect_current_ssh_port() {
 }
 
 prompt_for_public_key() {
-  echo
-  echo '请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，然后粘贴到下方并按回车。'
-  echo '通常是 ~/.ssh/id_ed25519.pub；Windows PowerShell 可执行：Get-Content $HOME\.ssh\id_ed25519.pub'
-  echo '只能粘贴 .pub 公钥，绝不能粘贴 id_ed25519 等没有 .pub 后缀的私钥文件。'
-  echo '示例：ssh-ed25519 AAAA... your-computer'
-  read -r -p 'root SSH 公钥：' PUBLIC_KEY
+  prompt_block <<'EOF'
+注意：
+  1. 请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，再粘贴到下方。
+  2. 公钥通常位于：
+     Linux/macOS：~/.ssh/id_ed25519.pub
+     Windows PowerShell：Get-Content $HOME\.ssh\id_ed25519.pub
+  3. 只能粘贴 .pub 公钥，绝不能粘贴 id_ed25519 等没有 .pub 后缀的私钥文件。
+  示例：ssh-ed25519 AAAA... your-computer
+EOF
+  read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY
 }
 
 interactive_wizard() {
@@ -194,54 +210,57 @@ interactive_wizard() {
     done
   fi
   [ "$ROTATE_TELEGRAM" -eq 0 ] || return 0
-  cat <<'EOF'
-
-将保留 root 作为唯一 SSH 用户，只允许你本次提供的 SSH 公钥登录，
-关闭 SSH 密码登录，启用 Fail2ban 和可选 Telegram 通知。
-本向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
-当前 SSH 连接请保持打开，直到新连接验证成功。
+  prompt_block <<'EOF'
+注意：
+  1. 只保留 root 作为 SSH 用户，并且只允许本次提供的 SSH 公钥登录。
+  2. SSH 密码登录会关闭，同时启用 Fail2ban 和可选的 Telegram 通知。
+  3. 向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
+  4. 请保持当前 SSH 窗口打开，直到新的 SSH 连接验证成功。
 EOF
   prompt_for_public_key
   current_port=$(detect_current_ssh_port)
   prompt_default SSH_PORT '新的 SSH 端口（直接回车保留当前端口；改端口前须放行云安全组）' "$current_port"
   if [ "$SSH_PORT" != "$current_port" ]; then
-    echo "注意：你选择将 SSH 端口从 $current_port 改为 $SSH_PORT。"
-    echo '请先在云厂商安全组/防火墙中放行新端口，否则新连接会失败。'
+    prompt_block <<EOF
+注意：
+  1. SSH 端口将从 $current_port 改为 $SSH_PORT。
+  2. 请先在云厂商安全组/防火墙中放行新端口，否则新的 SSH 连接会失败。
+EOF
     ask_yes_no '已确认新端口已放行吗？' n || die '已取消；请先放行新端口后再运行。'
   fi
   prompt_default IGNORE_IP 'Fail2ban 白名单 IP/CIDR（直接回车：不添加公网白名单）' ''
-  echo '提示：白名单只是不被 Fail2ban 封禁；正确的 SSH 私钥登录无需加入白名单也可正常使用。'
-  echo '系统更新会在最后输入 YES 后才执行；现在仅记录你的选择，尚未修改系统。'
+  prompt_line '提示：白名单只是不被 Fail2ban 封禁；正确的 SSH 私钥登录无需加入白名单也可正常使用。'
+  prompt_line '提示：系统更新会在最后输入 YES 后才执行；现在仅记录你的选择，尚未修改系统。'
   if ask_yes_no '执行 apt update 和 apt upgrade，安装可用的软件更新？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
   if ask_yes_no '启用 Telegram 登录/封禁通知？' n; then
-    cat <<'EOF'
-
-Telegram 配置步骤：
+    prompt_block <<'EOF'
+注意：Telegram 配置步骤如下。
   1. 在 Telegram 搜索 @BotFather，发送 /newbot 并按提示创建机器人。
   2. 复制 BotFather 返回的 HTTP API Token；该 Token 相当于机器人密码，不要发送给他人。
   3. 打开你创建的机器人，点击 Start 并发送任意一条消息。
   4. 在可信设备的浏览器访问：
-       https://api.telegram.org/bot<你的Token>/getUpdates
+     https://api.telegram.org/bot<你的Token>/getUpdates
      在返回内容中找到 message.chat.id，并复制对应的数字作为 Chat ID。
   5. 下方粘贴 Token 后，屏幕不会显示字符、星号或长度；这是正常的安全保护。
      粘贴完成直接按回车即可。Chat ID 可以正常粘贴和显示。
 EOF
-    read -rsp 'Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：' TELEGRAM_TOKEN
+    read -rsp "${STYLE_PROMPT}Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：${STYLE_RESET}" TELEGRAM_TOKEN
     printf '\n'
-    read -r -p 'Telegram Chat ID：' TELEGRAM_CHAT_ID
+    read -r -p "${STYLE_PROMPT}Telegram Chat ID：${STYLE_RESET}" TELEGRAM_CHAT_ID
     [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
     prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称' "$(hostname -f 2>/dev/null || hostname)"
   fi
-  echo
-  echo '即将应用以下设置：'
-  echo '  SSH 用户：root（仅本次提供的 SSH 公钥登录；旧公钥将失效）'
-  echo "  SSH 端口：$SSH_PORT"
-  echo "  Fail2ban 白名单：${IGNORE_IP:-未设置（不额外白名单公网 IP）}"
-  echo '  Fail2ban 策略：10 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口'
-  echo "  系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)"
-  echo "  Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)"
-  [ -z "$TELEGRAM_TOKEN" ] || echo "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
-  read -r -p '确认开始请输入 YES：' answer
+  prompt_block <<EOF
+注意：即将应用以下设置。
+  1. SSH 用户：root（仅本次提供的 SSH 公钥登录；旧公钥将失效）
+  2. SSH 端口：$SSH_PORT
+  3. Fail2ban 白名单：${IGNORE_IP:-未设置（不额外白名单公网 IP）}
+  4. Fail2ban 策略：10 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口
+  5. 系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)
+  6. Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)
+EOF
+  [ -z "$TELEGRAM_TOKEN" ] || prompt_line "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
+  read -r -p "${STYLE_PROMPT}确认开始请输入 YES：${STYLE_RESET}" answer
   [ "$answer" = YES ] || die '已取消，未修改系统。'
 }
 
@@ -309,31 +328,30 @@ rotate_telegram_token() {
   old_vps_name=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
   [ -n "$old_chat_id" ] || die '现有 Telegram 配置缺少 Chat ID；请重新执行初次部署。'
 
-  cat <<'EOF'
-
-Telegram Token 更换：
+  prompt_block <<'EOF'
+注意：Telegram Token 更换步骤如下。
   1. 在 Telegram 搜索 @BotFather，使用 /revoke 使旧 Token 失效并取得新 Token。
   2. 下方粘贴新 Token 后，终端不会显示字符、星号或长度；这是正常的安全保护。
   3. 如果仍使用同一个机器人，Chat ID 通常无需变更。
-
-此操作只更新 Telegram 配置并发送测试通知；不会修改 SSH、公钥、端口、Fail2ban 或系统软件包。
+  4. 此操作只更新 Telegram 配置并发送测试通知；不会修改 SSH、公钥、端口、Fail2ban 或系统软件包。
 EOF
-  read -rsp '新的 Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：' TELEGRAM_TOKEN
+  read -rsp "${STYLE_PROMPT}新的 Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：${STYLE_RESET}" TELEGRAM_TOKEN
   printf '\n'
   if ask_yes_no "保留原 Chat ID（$old_chat_id）？" y; then
     TELEGRAM_CHAT_ID=$old_chat_id
   else
-    read -r -p '新的 Telegram Chat ID：' TELEGRAM_CHAT_ID
+    read -r -p "${STYLE_PROMPT}新的 Telegram Chat ID：${STYLE_RESET}" TELEGRAM_CHAT_ID
   fi
   prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称（直接回车保留原名称）' "$old_vps_name"
   validate_telegram_settings
 
-  echo
-  echo '即将更新 Telegram 配置：'
-  echo "  Chat ID：$TELEGRAM_CHAT_ID"
-  echo "  VPS 名称：$TELEGRAM_VPS_NAME"
-  echo '  SSH、公钥、端口、Fail2ban 策略：不修改'
-  read -r -p '确认更新并发送测试通知请输入 YES：' answer
+  prompt_block <<EOF
+注意：即将更新 Telegram 配置。
+  1. Chat ID：$TELEGRAM_CHAT_ID
+  2. VPS 名称：$TELEGRAM_VPS_NAME
+  3. SSH、公钥、端口、Fail2ban 策略：不修改
+EOF
+  read -r -p "${STYLE_PROMPT}确认更新并发送测试通知请输入 YES：${STYLE_RESET}" answer
   [ "$answer" = YES ] || die '已取消，Telegram 配置未修改。'
 
   write_telegram_env
