@@ -20,10 +20,10 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 ## 固定版本运行（可选）
 
-如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.1.0`：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.1.1`：
 
 ```bash
-bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.1.0/bootstrap.sh)
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.1.1/bootstrap.sh)
 ```
 
 以后发布新版本后，如需固定使用新版，只需把命令中的版本号改为对应的新版本号。
@@ -56,7 +56,7 @@ Get-Content $HOME\.ssh\id_ed25519.pub
 
 1. 粘贴 root 的 SSH 公钥。
 2. 选择 SSH 端口；默认保持当前端口，避免云安全组未放行新端口时失联。
-3. 可选填写 Fail2ban 白名单、是否执行系统更新和 Telegram 通知；此时仅记录选择，尚未修改系统。
+3. 可选填写 Fail2ban 白名单、是否执行系统更新和 Telegram 通知；所有 `[y/N]` 确认项直接回车均为“否”，必须输入 `y` 才会同意；此时仅记录选择，尚未修改系统。
 4. 查看摘要并确认执行；此项默认“否”，请输入 `y` 后回车才会开始修改系统。
 5. 脚本安装组件、用本次公钥覆盖 `/root/.ssh/authorized_keys`、禁用其他 root 公钥来源、只允许 root 公钥登录、启动 Fail2ban。
 
