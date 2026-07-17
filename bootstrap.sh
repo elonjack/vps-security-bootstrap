@@ -142,8 +142,11 @@ discard_pasted_empty_lines() {
   local buffered
   while IFS= read -r -t 0.05 buffered; do
     buffered=${buffered%$'\r'}
-    [ -n "$buffered" ] && break
+    if [ -n "$buffered" ]; then
+      break
+    fi
   done
+  return 0
 }
 
 prompt_block() {
