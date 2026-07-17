@@ -6,19 +6,29 @@
 
 > 直接使用 root 的代价是：私钥一旦泄露，攻击者直接拥有最高权限。请为这台 VPS 使用专用、强口令保护的私钥，且不要共享。
 
-## 安全获取并运行
+## 一键运行（最新稳定版）
 
-不要下载可变的 `main` 分支后直接以 root 执行。请从 [Releases](https://github.com/elonjack/vps-security-bootstrap/releases) 下载指定版本的 `bootstrap.sh` 和对应的 `bootstrap.sh.sha256`，校验通过后再运行。
+以 root 登录 VPS 后直接执行：
 
 ```bash
-VERSION='替换为发布版本，例如 v1.0.0'
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/bootstrap.sh)
+```
+
+这会下载并运行最新的正式 Release，而不是可变的 `main` 分支。脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。运行前请确认你信任本仓库；该命令会以 root 权限执行远程脚本。
+
+## 固定版本与校验（可选）
+
+如果你希望记录或复现确切执行的版本，请从 [Releases](https://github.com/elonjack/vps-security-bootstrap/releases) 选择版本号并校验下载文件：
+
+```bash
+VERSION='v1.0.1'
 curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh"
 curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh.sha256"
 sha256sum -c bootstrap.sh.sha256
-sudo bash bootstrap.sh
+bash bootstrap.sh
 ```
 
-校验输出必须为 `bootstrap.sh: OK`。脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。
+校验输出必须为 `bootstrap.sh: OK`。此方式适合需要审计或明确固定版本的场景。
 
 ## 如何准备并粘贴公钥
 
