@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 0.4 seconds
+Wall time: 0.5 seconds
 Output:
 #!/usr/bin/env bash
 # Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
@@ -530,6 +530,20 @@ ENV_FILE=/etc/vps-security/telegram.env
 [ -r "$ENV_FILE" ] || exit 0
 source "$ENV_FILE"
 html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+root_ssh_sources_html() {
+  local source found=0
+  while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    printf '• <code>%s</code>\n' "$(html_escape "$source")"
+    found=1
+  done < <(
+    {
+      who | awk '$1 == "root" && $NF ~ /^\([^()]+\)$/ { value=$NF; gsub(/[()]/, "", value); print value }'
+      [ -n "${PAM_RHOST:-}" ] && printf '%s\n' "$PAM_RHOST"
+    } | awk 'NF && !seen[$0]++'
+  )
+  [ "$found" -eq 1 ] || printf '• 未检测到 root SSH 会话\n'
+}
 format_duration() {
   local seconds=$1
   case "$seconds" in
@@ -560,12 +574,15 @@ case "$event" in
   login)
     [ "$PAM_SERVICE" = sshd ] && [ "$PAM_TYPE" = open_session ] || exit 0
     ip=${PAM_RHOST:-unknown}
+    root_ssh_sources=$(root_ssh_sources_html)
     send "<b>✅ SSH 公钥登录成功</b>
 <b>📌 $name</b>
 ━━━━━━━━━━━━
 🖥 主机：<code>$host</code>
 👤 用户：<code>$(html_escape "$PAM_USER")</code>
 🌐 来源 IP：<code>$(html_escape "$ip")</code>
+🔐 当前 root SSH 会话 IP：
+$root_ssh_sources
 🕒 时间：<code>$now</code>"
     ;;
   ban)
@@ -653,9 +670,16 @@ fi
 
 info '校验并启动 Fail2ban'
 fail2ban-client -d >/dev/null
-systemctl enable --now fail2ban
+systemctl enable fail2ban
 systemctl restart fail2ban
-fail2ban-client ping >/dev/null
+for ((attempt = 1; attempt <= 20; attempt++)); do
+  fail2ban-client ping >/dev/null 2>&1 && break
+  sleep 0.5
+done
+fail2ban-client ping >/dev/null 2>&1 || {
+  systemctl status fail2ban --no-pager -l >&2 || true
+  die 'Fail2ban 在 10 秒内未就绪；请查看上方服务状态。'
+}
 fail2ban-client status sshd
 
 cat <<EOF
