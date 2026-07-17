@@ -47,28 +47,14 @@ cat ~/.ssh/id_ed25519.pub
 
 **同一个 Bot Token 可以用于多台 VPS 的通知**：为每台机器设置不同名称即可。请确保接收通知的聊天仅对可信成员开放，因为通知包含来源 IP。
 
-### Telegram 按钮封禁（可选）
+### 收到未知“登录成功”通知怎么办
 
-登录成功和自动封禁通知下方可以显示“🚫 封禁此 IP”。点击后可选择：**1 分钟、1 小时、1 天、1 周、永久**。按钮操作同时校验接收聊天和你配置的 Telegram 用户数字 ID；手动封禁只阻断该 IP 对本机 SSH 端口的访问。
-
-登录成功通知中的 IP 可能正是你自己；没有控制台或其他可用网络出口时，不要误点自己的来源 IP。
-
-这个模式有一条重要限制：**启用按钮控制的 Bot Token 必须专供这一台 VPS。** Telegram 的 `getUpdates` 回调队列由同一个 Bot 全局共享；同一 Token 被多台 VPS 同时轮询会发生抢消息，按钮无法可靠路由到正确的服务器。
-
-因此：
-
-- 多台 VPS 共用一个 Bot：选择“仅通知”，不要启用按钮控制。
-- 每台 VPS 使用独立 Bot Token、但发送到同一个 Telegram 聊天：可以为每台启用按钮控制。
-- 想要“一个 Bot 控制多台 VPS”：需要独立的集中式 Webhook/控制器，本脚本不会伪造一个不可靠的实现。
-
-启用按钮控制时，向导会要求确认 Bot 专用，并输入允许操作的 Telegram 用户数字 ID。不要在群组中把该 Bot 的管理权限交给不可信成员。
+不要只封禁该 IP：攻击者可能换 IP，而且成功登录意味着某把已授权公钥、账号或服务器本身可能已失陷。应先通过云厂商控制台或另一条可信连接保留访问，再撤销可疑公钥、检查 SSH 与 sudo 记录、轮换密钥；无法确认影响范围时，建议从可信镜像重建主机并恢复已验证的数据。
 
 ## 封禁策略
 
 - SSH 登录失败 3 次/10 分钟：开始递增封禁，初始 1 天，随后逐步延长，最高 4 周。
 - 同一 IP 在 **30 天内累计触发 5 次完整封禁**：`recidive` jail 将对该 IP **永久封禁所有端口**。
-- Telegram 手动封禁可自行选择时长或永久封禁，只影响 SSH 端口。
-
 不把每次爆破都永久封禁，是为了降低动态公网 IP、误输密码或共享出口地址造成的长期误伤；对持续反复攻击者则会自动升级为永久封禁。
 
 ## 完成后必须验证
@@ -92,7 +78,7 @@ sudo /usr/local/sbin/vps-security-confirm
 - 创建或更新指定管理员，并只授权所选 SSH 公钥。
 - 禁止 root、SSH 密码、键盘交互登录，以及 SSH 转发、X11、隧道。
 - 使用 nftables 后端的 Fail2ban，启用递增封禁和针对持续攻击者的永久 `recidive` 封禁。
-- 安装 OpenSSH、Fail2ban、nftables、curl、jq、sudo、unattended-upgrades，并启用 Debian 自动安全更新。
+- 安装 OpenSSH、Fail2ban、nftables、curl、sudo、unattended-upgrades，并启用 Debian 自动安全更新。
 - 备份本工具管理的配置到 `/etc/vps-security/backups/`，并在重载 SSH 前验证最终生效配置。
 
 脚本不会修改云厂商安全组或清空现有防火墙规则；这类操作因环境不同容易造成断连，需要你自行确认。
@@ -117,12 +103,6 @@ Telegram 自动化参数：
 --telegram-vps-name 'HK-01'
 ```
 
-专用 Bot 才可额外添加：
-
-```bash
---telegram-control --telegram-admin-user-id 123456789
-```
-
 密码和 Telegram 凭据文件必须归 root 所有、权限为 `0600` 或更严格；不要把它们放进命令行历史。
 
 常用检查命令：
@@ -131,7 +111,4 @@ Telegram 自动化参数：
 sudo sshd -t
 sudo fail2ban-client status sshd
 sudo fail2ban-client status recidive
-# 仅在启用 Telegram 按钮控制时运行：
-sudo fail2ban-client status manual-telegram
-sudo systemctl status vps-security-telegram-control
 ```

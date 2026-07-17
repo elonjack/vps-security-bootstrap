@@ -10,12 +10,10 @@ readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.con
 readonly F2B_JAIL='/etc/fail2ban/jail.d/sshd-vps-security.local'
 readonly F2B_ACTION='/etc/fail2ban/action.d/vps-security-telegram.conf'
 readonly F2B_RECIDIVE_JAIL='/etc/fail2ban/jail.d/recidive-vps-security.local'
-readonly F2B_MANUAL_JAIL='/etc/fail2ban/jail.d/manual-telegram-vps-security.local'
-readonly F2B_MANUAL_FILTER='/etc/fail2ban/filter.d/manual-telegram.conf'
 readonly F2B_LOG_LOCAL='/etc/fail2ban/fail2ban.d/00-vps-security-bootstrap.local'
 readonly NOTIFIER='/usr/local/sbin/vps-security-notify'
-readonly TELEGRAM_CONTROL='/usr/local/sbin/vps-security-telegram-control'
-readonly TELEGRAM_CONTROL_SERVICE='/etc/systemd/system/vps-security-telegram-control.service'
+readonly LEGACY_TELEGRAM_CONTROL='/usr/local/sbin/vps-security-telegram-control'
+readonly LEGACY_TELEGRAM_CONTROL_SERVICE='/etc/systemd/system/vps-security-telegram-control.service'
 readonly CONFIRM='/usr/local/sbin/vps-security-confirm'
 readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/52-vps-security-bootstrap-auto-upgrades'
 SSH_PORT=52022
@@ -30,8 +28,6 @@ TELEGRAM_CHAT_ID=''
 TELEGRAM_TOKEN_FILE=''
 TELEGRAM_CHAT_ID_FILE=''
 TELEGRAM_VPS_NAME=''
-TELEGRAM_CONTROL_ENABLED=0
-TELEGRAM_ADMIN_USER_ID=''
 BANTIME=1d
 ROLLBACK_SECONDS=600
 SCHEDULE_ROLLBACK=1
@@ -64,8 +60,6 @@ EOF
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
   --telegram-vps-name NAME     Telegram 中显示的 VPS 名称（默认：主机名）
-  --telegram-control           启用 Telegram 封禁按钮；仅限此 Bot Token 专供本机轮询
-  --telegram-admin-user-id ID  可操作封禁按钮的 Telegram 用户数字 ID（控制模式必填）
   --admin-password-file PATH   自动化运行时从单行文件读取管理员 sudo 密码
   --allow-nopasswd-sudo         允许管理员免密 sudo（不推荐；私钥失窃即获得 root）
   --permanent-bans             永久封禁（不推荐，默认逐级延长至 4 周）
@@ -94,8 +88,6 @@ while [ "$#" -gt 0 ]; do
     --telegram-token-file) need_value "$@"; TELEGRAM_TOKEN_FILE=$2; shift 2 ;;
     --telegram-chat-id-file) need_value "$@"; TELEGRAM_CHAT_ID_FILE=$2; shift 2 ;;
     --telegram-vps-name) need_value "$@"; TELEGRAM_VPS_NAME=$2; shift 2 ;;
-    --telegram-control) TELEGRAM_CONTROL_ENABLED=1; shift ;;
-    --telegram-admin-user-id) need_value "$@"; TELEGRAM_ADMIN_USER_ID=$2; shift 2 ;;
     --permanent-bans) BANTIME=-1; shift ;;
     --skip-system-upgrade) SYSTEM_UPGRADE=0; shift ;;
     --no-rollback) SCHEDULE_ROLLBACK=0; shift ;;
@@ -215,19 +207,6 @@ EOF
     read -r -p 'Telegram Chat ID：' TELEGRAM_CHAT_ID
     [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
     prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称' "$(hostname -f 2>/dev/null || hostname)"
-    if ask_yes_no '启用 Telegram 按钮式手动封禁？' n; then
-      cat <<'EOF'
-重要：按钮控制需要本机持续轮询 Bot 的回调消息。
-同一个 Bot Token 被多台 VPS 同时使用时，回调会被其中一台抢走，无法可靠路由。
-只有为本机单独创建 Bot Token 时才可启用；多个 VPS 共用一个 Bot 时请选择 n，仅保留通知。
-EOF
-      if ask_yes_no '确认此 Bot Token 只供这一台 VPS 使用？' n; then
-        TELEGRAM_CONTROL_ENABLED=1
-        read -r -p '允许操作按钮的 Telegram 用户数字 ID：' TELEGRAM_ADMIN_USER_ID
-      else
-        echo '将保持 Telegram 通知模式，不启用按钮控制。'
-      fi
-    fi
   fi
   echo
   echo '即将应用以下设置：'
@@ -236,7 +215,6 @@ EOF
   echo "  系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)"
   echo "  Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)"
   [ -z "$TELEGRAM_TOKEN" ] || echo "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
-  echo "  Telegram 按钮控制：$([ "$TELEGRAM_CONTROL_ENABLED" -eq 1 ] && echo 是 || echo 否)"
   echo '  SSH 回滚保护：10 分钟内未确认将自动还原本脚本写入的 SSH 配置'
   read -r -p '确认开始请输入 YES：' answer
   [ "$answer" = YES ] || die '已取消，未修改系统。'
@@ -270,10 +248,6 @@ require_root_private_file() {
 [ -z "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
 [ -z "$TELEGRAM_TOKEN" ] || TELEGRAM_VPS_NAME=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
 [ -z "$TELEGRAM_VPS_NAME" ] || [[ "$TELEGRAM_VPS_NAME" != *$'\n'* && "$TELEGRAM_VPS_NAME" != *$'\r'* && ${#TELEGRAM_VPS_NAME} -le 80 ]] || die 'Telegram VPS 名称不能包含换行，且最多 80 个字符。'
-if [ "$TELEGRAM_CONTROL_ENABLED" -eq 1 ]; then
-  [ -n "$TELEGRAM_TOKEN" ] || die 'Telegram 按钮控制需要同时启用 Telegram 通知。'
-  [[ "$TELEGRAM_ADMIN_USER_ID" =~ ^[0-9]{4,20}$ ]] || die 'Telegram 管理员用户 ID 必须是 4–20 位数字。'
-fi
 
 if [ -n "$ADMIN_PASSWORD_FILE" ]; then
   ADMIN_PASSWORD=$(head -n 1 "$ADMIN_PASSWORD_FILE")
@@ -308,19 +282,26 @@ backup_if_exists /etc/pam.d/sshd pam-sshd.before
 backup_if_exists "$F2B_JAIL" fail2ban-jail.before
 backup_if_exists "$F2B_ACTION" fail2ban-action.before
 backup_if_exists "$F2B_RECIDIVE_JAIL" fail2ban-recidive-jail.before
-backup_if_exists "$F2B_MANUAL_JAIL" fail2ban-manual-jail.before
-backup_if_exists "$F2B_MANUAL_FILTER" fail2ban-manual-filter.before
 backup_if_exists "$F2B_LOG_LOCAL" fail2ban-log-local.before
-backup_if_exists "$TELEGRAM_CONTROL_SERVICE" telegram-control-service.before
 backup_if_exists "$NOTIFIER" telegram-notifier.before
-backup_if_exists "$TELEGRAM_CONTROL" telegram-control.before
 backup_if_exists "$CONF_DIR/telegram.env" telegram-env.before
+backup_if_exists "$LEGACY_TELEGRAM_CONTROL" legacy-telegram-control.before
+backup_if_exists "$LEGACY_TELEGRAM_CONTROL_SERVICE" legacy-telegram-control-service.before
+
+# 清理由旧版本“Telegram 按钮控制”创建的服务；登录异常应按密钥泄露事件处理，
+# 不应依赖封禁单个 IP，因此新版本不再提供该控制面。
+systemctl disable --now vps-security-telegram-control.service 2>/dev/null || true
+rm -f "$LEGACY_TELEGRAM_CONTROL" "$LEGACY_TELEGRAM_CONTROL_SERVICE" \
+  /etc/fail2ban/jail.d/manual-telegram-vps-security.local \
+  /etc/fail2ban/filter.d/manual-telegram.conf \
+  /var/log/vps-security-manual-telegram.log
+systemctl daemon-reload
 
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 [ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get upgrade -y
-apt-get install -y openssh-server fail2ban nftables curl jq sudo libpam-modules unattended-upgrades
+apt-get install -y openssh-server fail2ban nftables curl sudo libpam-modules unattended-upgrades
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
 printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
@@ -452,8 +433,8 @@ systemctl reload ssh
 
 info '写入 Fail2ban 配置（systemd journal + nftables）'
 if [ -n "$TELEGRAM_TOKEN" ]; then
-  printf 'TELEGRAM_BOT_TOKEN=%q\nTELEGRAM_CHAT_ID=%q\nTELEGRAM_VPS_NAME=%q\nTELEGRAM_CONTROL_ENABLED=%q\nTELEGRAM_ADMIN_USER_ID=%q\n' \
-    "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_ID" "$TELEGRAM_VPS_NAME" "$TELEGRAM_CONTROL_ENABLED" "$TELEGRAM_ADMIN_USER_ID" > "$CONF_DIR/telegram.env"
+  printf 'TELEGRAM_BOT_TOKEN=%q\nTELEGRAM_CHAT_ID=%q\nTELEGRAM_VPS_NAME=%q\n' \
+    "$TELEGRAM_TOKEN" "$TELEGRAM_CHAT_ID" "$TELEGRAM_VPS_NAME" > "$CONF_DIR/telegram.env"
   chmod 0600 "$CONF_DIR/telegram.env"
   cat > "$NOTIFIER" <<'EOF'
 #!/usr/bin/env bash
@@ -462,7 +443,6 @@ ENV_FILE=/etc/vps-security/telegram.env
 [ -r "$ENV_FILE" ] || exit 0
 source "$ENV_FILE"
 html_escape() { printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
-is_ip_literal() { [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
 format_duration() {
   local seconds=$1
   case "$seconds" in
@@ -476,15 +456,9 @@ format_duration() {
       ;;
   esac
 }
-ban_button() {
-  local ip=$1
-  [ "${TELEGRAM_CONTROL_ENABLED:-0}" = 1 ] && is_ip_literal "$ip" || return 0
-  jq -cn --arg ip "$ip" '{inline_keyboard:[[{text:"🚫 封禁此 IP",callback_data:("ban:" + $ip)}]]}'
-}
 send() {
-  local text=$1 keyboard=${2:-}
+  local text=$1
   local -a args=(--data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$text" --data-urlencode 'parse_mode=HTML' --data-urlencode 'disable_web_page_preview=true')
-  [ -z "$keyboard" ] || args+=(--data-urlencode "reply_markup=$keyboard")
   curl --silent --show-error --fail --connect-timeout 3 --max-time 8 "${args[@]}" \
     "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" >/dev/null || true
 }
@@ -503,7 +477,7 @@ case "$event" in
 🖥 主机：<code>$host</code>
 👤 用户：<code>$(html_escape "$PAM_USER")</code>
 🌐 来源 IP：<code>$(html_escape "$ip")</code>
-🕒 时间：<code>$now</code>" "$(ban_button "$ip")"
+🕒 时间：<code>$now</code>"
     ;;
   ban)
     ip=$2 jail=$3 duration=${4:-} count=${5:-}
@@ -515,7 +489,7 @@ case "$event" in
 🌐 IP：<code>$(html_escape "$ip")</code>
 ⏳ 本次封禁：<b>$(format_duration "$duration")</b>
 🔁 历史封禁次数：<b>${count:-未知}</b>
-🕒 时间：<code>$now</code>" "$(ban_button "$ip")"
+🕒 时间：<code>$now</code>"
     ;;
 esac
 EOF
@@ -530,8 +504,7 @@ EOF
 session optional pam_exec.so quiet type=open_session /usr/local/sbin/vps-security-notify login
 EOF
 else
-  systemctl disable --now vps-security-telegram-control.service 2>/dev/null || true
-  rm -f "$F2B_ACTION" "$NOTIFIER" "$TELEGRAM_CONTROL" "$TELEGRAM_CONTROL_SERVICE" "$CONF_DIR/telegram.env"
+  rm -f "$F2B_ACTION" "$NOTIFIER" "$CONF_DIR/telegram.env"
   sed -i '/^# vps-security-bootstrap: Telegram SSH login notification$/,+1d' /etc/pam.d/sshd
 fi
 
@@ -589,188 +562,12 @@ action = %(action_)s
 EOF
 fi
 
-if [ "$TELEGRAM_CONTROL_ENABLED" -eq 1 ]; then
-  touch /var/log/vps-security-manual-telegram.log
-  chmod 0600 /var/log/vps-security-manual-telegram.log
-  cat > "$F2B_MANUAL_FILTER" <<'EOF'
-[Definition]
-failregex = ^__vps_security_manual_never_matches__ <HOST>$
-ignoreregex =
-EOF
-  cat > "$F2B_MANUAL_JAIL" <<EOF
-[manual-telegram]
-enabled = true
-filter = manual-telegram
-backend = polling
-logpath = /var/log/vps-security-manual-telegram.log
-bantime = -1
-findtime = 1s
-maxretry = 999999
-port = $SSH_PORT
-banaction = nftables-multiport
-EOF
-else
-  rm -f "$F2B_MANUAL_JAIL" "$F2B_MANUAL_FILTER" /var/log/vps-security-manual-telegram.log
-fi
-
 info '校验并启动 Fail2ban'
 fail2ban-client -d >/dev/null
 systemctl enable --now fail2ban
 systemctl restart fail2ban
 fail2ban-client ping >/dev/null
 fail2ban-client status sshd
-
-if [ "$TELEGRAM_CONTROL_ENABLED" -eq 1 ]; then
-  cat > "$TELEGRAM_CONTROL" <<'EOF'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-ENV_FILE=/etc/vps-security/telegram.env
-STATE_DIR=/var/lib/vps-security
-OFFSET_FILE=$STATE_DIR/telegram-update-offset
-[ -r "$ENV_FILE" ] || exit 1
-source "$ENV_FILE"
-[ "${TELEGRAM_CONTROL_ENABLED:-0}" = 1 ] || exit 0
-mkdir -p -m 0700 "$STATE_DIR"
-
-api_post() {
-  local method=$1
-  shift
-  curl --silent --show-error --fail --connect-timeout 5 --max-time 65 \
-    "$@" "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/$method"
-}
-is_ip_literal() { [[ "$1" =~ ^[0-9A-Fa-f:.]+$ ]]; }
-answer() {
-  local callback_id=$1 text=$2
-  api_post answerCallbackQuery --data-urlencode "callback_query_id=$callback_id" --data-urlencode "text=$text" >/dev/null || true
-}
-clear_buttons() {
-  local chat_id=$1 message_id=$2
-  api_post editMessageReplyMarkup --data-urlencode "chat_id=$chat_id" --data-urlencode "message_id=$message_id" \
-    --data-urlencode 'reply_markup={"inline_keyboard":[]}' >/dev/null || true
-}
-duration_keyboard() {
-  local ip=$1
-  jq -cn --arg ip "$ip" '{inline_keyboard:[
-    [{text:"1 分钟", callback_data:("banfor:1m:" + $ip)}, {text:"1 小时", callback_data:("banfor:1h:" + $ip)}],
-    [{text:"1 天", callback_data:("banfor:1d:" + $ip)}, {text:"1 周", callback_data:("banfor:1w:" + $ip)}],
-    [{text:"永久封禁", callback_data:("banfor:permanent:" + $ip)}]
-  ]}'
-}
-write_offset() {
-  printf '%s\n' "$1" > "$OFFSET_FILE.tmp"
-  chmod 0600 "$OFFSET_FILE.tmp"
-  mv -f "$OFFSET_FILE.tmp" "$OFFSET_FILE"
-}
-show_duration_menu() {
-  local chat_id=$1 message_id=$2 ip=$3 keyboard
-  keyboard=$(duration_keyboard "$ip")
-  api_post editMessageReplyMarkup --data-urlencode "chat_id=$chat_id" --data-urlencode "message_id=$message_id" \
-    --data-urlencode "reply_markup=$keyboard" >/dev/null || true
-}
-ban_ip() {
-  local ip=$1 duration=$2 hash unit
-  hash=$(printf '%s' "$ip" | sha256sum | cut -c1-16)
-  unit="vps-security-telegram-unban-$hash"
-  systemctl stop "$unit.timer" "$unit.service" 2>/dev/null || true
-  systemctl reset-failed "$unit.timer" "$unit.service" 2>/dev/null || true
-  fail2ban-client set manual-telegram banip "$ip" >/dev/null
-  if [ "$duration" != permanent ]; then
-    systemd-run --quiet --unit="$unit" --on-active="$duration" \
-      /usr/bin/fail2ban-client set manual-telegram unbanip "$ip"
-  fi
-}
-handle_callback() {
-  local callback=$1 callback_id from_id chat_id message_id data rest duration ip
-  callback_id=$(jq -r '.id // empty' <<<"$callback")
-  from_id=$(jq -r '.from.id // empty' <<<"$callback")
-  chat_id=$(jq -r '.message.chat.id // empty' <<<"$callback")
-  message_id=$(jq -r '.message.message_id // empty' <<<"$callback")
-  data=$(jq -r '.data // empty' <<<"$callback")
-  [ -n "$callback_id" ] || return 0
-  if [ "$from_id" != "$TELEGRAM_ADMIN_USER_ID" ] || [ "$chat_id" != "$TELEGRAM_CHAT_ID" ]; then
-    answer "$callback_id" '无权执行此操作。'
-    return 0
-  fi
-  case "$data" in
-    ban:*)
-      ip=${data#ban:}
-      is_ip_literal "$ip" || { answer "$callback_id" 'IP 格式无效。'; return 0; }
-      show_duration_menu "$chat_id" "$message_id" "$ip"
-      answer "$callback_id" "为 $ip 选择封禁时长"
-      ;;
-    banfor:*)
-      rest=${data#banfor:}
-      duration=${rest%%:*}
-      ip=${rest#*:}
-      case "$duration" in 1m|1h|1d|1w|permanent) ;; *) answer "$callback_id" '封禁时长无效。'; return 0 ;; esac
-      is_ip_literal "$ip" || { answer "$callback_id" 'IP 格式无效。'; return 0; }
-      if ban_ip "$ip" "$duration"; then
-        clear_buttons "$chat_id" "$message_id"
-        if [ "$duration" = permanent ]; then answer "$callback_id" "已永久封禁 $ip"
-        else answer "$callback_id" "已封禁 $ip：$duration"; fi
-      else
-        answer "$callback_id" '封禁失败；请检查 Fail2ban 服务。'
-      fi
-      ;;
-    *) answer "$callback_id" '未知操作。' ;;
-  esac
-}
-
-offset=0
-if [ -r "$OFFSET_FILE" ]; then
-  offset=$(cat "$OFFSET_FILE")
-  [[ "$offset" =~ ^[0-9]+$ ]] || offset=0
-else
-  # 首次启用时仅记录既有队列的最后一个 update，避免旧按钮在新控制器启动后被重复执行。
-  initial=$(api_post getUpdates --data-urlencode 'timeout=0' --data-urlencode 'allowed_updates=["callback_query"]' 2>/dev/null || true)
-  if jq -e '.ok == true' >/dev/null <<<"$initial"; then
-    last_update=$(jq -r '.result[-1].update_id // empty' <<<"$initial")
-    if [[ "$last_update" =~ ^[0-9]+$ ]]; then
-      offset=$((last_update + 1))
-      write_offset "$offset"
-    fi
-  fi
-fi
-while true; do
-  response=$(api_post getUpdates --data-urlencode "offset=$offset" --data-urlencode 'timeout=50' --data-urlencode 'allowed_updates=["callback_query"]') || { sleep 5; continue; }
-  jq -e '.ok == true' >/dev/null <<<"$response" || { sleep 5; continue; }
-  while IFS= read -r update; do
-    update_id=$(jq -r '.update_id' <<<"$update")
-    offset=$((update_id + 1))
-    write_offset "$offset"
-    callback=$(jq -c '.callback_query // empty' <<<"$update")
-    [ -z "$callback" ] || handle_callback "$callback"
-  done < <(jq -c '.result[]?' <<<"$response")
-done
-EOF
-  chmod 0700 "$TELEGRAM_CONTROL"
-  cat > "$TELEGRAM_CONTROL_SERVICE" <<'EOF'
-[Unit]
-Description=VPS Security Telegram ban-button controller
-After=network-online.target fail2ban.service
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/sbin/vps-security-telegram-control
-Restart=always
-RestartSec=5
-NoNewPrivileges=true
-PrivateTmp=true
-ProtectHome=true
-ProtectSystem=full
-ReadWritePaths=/var/lib/vps-security
-
-[Install]
-WantedBy=multi-user.target
-EOF
-  systemctl daemon-reload
-  systemctl enable --now vps-security-telegram-control.service
-else
-  systemctl disable --now vps-security-telegram-control.service 2>/dev/null || true
-  rm -f "$TELEGRAM_CONTROL" "$TELEGRAM_CONTROL_SERVICE"
-  systemctl daemon-reload
-fi
 
 cat <<EOF
 
@@ -782,5 +579,4 @@ if [ "$SCHEDULE_ROLLBACK" -eq 1 ]; then
   echo "若 $ROLLBACK_SECONDS 秒内没有确认，SSH drop-in 会自动回滚。"
 fi
 [ -n "$TELEGRAM_TOKEN" ] && echo "Telegram 已启用：通知将以“$TELEGRAM_VPS_NAME”显示，请确保该聊天仅对可信成员开放。"
-[ "$TELEGRAM_CONTROL_ENABLED" -eq 1 ] && echo 'Telegram 按钮控制已启用：仅配置的 Telegram 用户 ID 可选择封禁 1 分钟、1 小时、1 天、1 周或永久。'
 echo '注意：请在云厂商安全组/防火墙中先放行新的 SSH 端口。'
