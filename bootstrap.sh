@@ -359,6 +359,7 @@ backup_if_exists "$SSH_DROPIN" ssh-dropin.before
 backup_if_exists "$LEGACY_SSH_DROPIN" ssh-dropin-legacy.before
 backup_if_exists /etc/pam.d/sshd pam-sshd.before
 backup_if_exists /root/.ssh/authorized_keys root-authorized-keys.before
+backup_if_exists /root/.ssh/authorized_keys2 root-authorized-keys2.before
 backup_if_exists "$F2B_JAIL" fail2ban-jail.before
 backup_if_exists "$F2B_ACTION" fail2ban-action.before
 backup_if_exists "$F2B_RECIDIVE_JAIL" fail2ban-recidive-jail.before
@@ -395,6 +396,7 @@ install -d -o root -g root -m 0700 /root/.ssh
 printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
 chown root:root /root/.ssh/authorized_keys
 chmod 0600 /root/.ssh/authorized_keys
+rm -f /root/.ssh/authorized_keys2
 
 info '写入 SSH 加固配置（只管理自己的 drop-in 文件）'
 install -d -m 0755 /etc/ssh/sshd_config.d
@@ -408,6 +410,10 @@ PermitRootLogin yes
 AllowUsers root
 PubkeyAuthentication yes
 AuthenticationMethods publickey
+AuthorizedKeysFile .ssh/authorized_keys
+AuthorizedKeysCommand none
+TrustedUserCAKeys none
+StrictModes yes
 PasswordAuthentication no
 KbdInteractiveAuthentication no
 ChallengeResponseAuthentication no
@@ -450,6 +456,10 @@ assert_sshd_single_value permitrootlogin yes
 assert_sshd_single_value allowusers root
 assert_sshd_single_value pubkeyauthentication yes
 assert_sshd_single_value authenticationmethods publickey
+assert_sshd_single_value authorizedkeysfile .ssh/authorized_keys
+assert_sshd_single_value authorizedkeyscommand none
+assert_sshd_single_value trustedusercakeys none
+assert_sshd_single_value strictmodes yes
 assert_sshd_single_value passwordauthentication no
 assert_sshd_single_value kbdinteractiveauthentication no
 assert_sshd_single_value allowtcpforwarding no
