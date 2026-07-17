@@ -129,9 +129,56 @@ ask_yes_no() {
 
 menu_option() {
   local number=$1 title=$2 description=${3:-}
-  printf '  %b[%s]%b  %s' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
+  printf '  %b%s.%b %s' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
   [ -z "$description" ] || printf ' %b· %s%b' "$STYLE_DIM" "$description" "$STYLE_RESET"
   printf '\n'
+}
+
+terminal_columns() {
+  local columns
+  columns=$(tput cols 2>/dev/null || true)
+  [[ "$columns" =~ ^[0-9]+$ ]] && [ "$columns" -ge 40 ] || columns=${COLUMNS:-80}
+  printf '%s' "$columns"
+}
+
+center_banner_line() {
+  local line=$1 columns visible=0 padding character index
+  columns=$(terminal_columns)
+  for ((index = 0; index < ${#line}; index++)); do
+    character=${line:index:1}
+    if [ "$character" = ' ' ]; then
+      visible=$((visible + 1))
+    else
+      visible=$((visible + 2))
+    fi
+  done
+  padding=$(( (columns - visible) / 2 ))
+  [ "$padding" -ge 0 ] || padding=0
+  printf '%*s%b%s%b\n' "$padding" '' "$STYLE_TITLE" "$line" "$STYLE_RESET"
+}
+
+center_ascii_line() {
+  local line=$1 style=$2 columns padding
+  columns=$(terminal_columns)
+  padding=$(( (columns - ${#line}) / 2 ))
+  [ "$padding" -ge 0 ] || padding=0
+  printf '%*s%b%s%b\n' "$padding" '' "$style" "$line" "$STYLE_RESET"
+}
+
+print_banner() {
+  local -a logo=(
+    '██╗   ██╗██████╗ ███████╗'
+    '██║   ██║██╔══██╗██╔════╝'
+    '██║   ██║██████╔╝███████╗'
+    '╚██╗ ██╔╝██╔═══╝ ╚════██║'
+    ' ╚████╔╝ ██║     ███████║'
+    '  ╚═══╝  ╚═╝     ╚══════╝'
+  )
+  local line
+  for line in "${logo[@]}"; do
+    center_banner_line "$line"
+  done
+  center_ascii_line 'VPS SECURITY BOOTSTRAP · DEBIAN 12 / 13' "$STYLE_DIM"
 }
 
 detect_current_ssh_port() {
@@ -156,7 +203,7 @@ interactive_wizard() {
   [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh'
   [ -t 0 ] || die '交互式向导需要终端；自动化运行请传入 --public-key-file 等参数。'
   clear 2>/dev/null || true
-  printf '%bVPS 安全管理%b %b· Debian 12 / 13 · root 专用%b\n' "$STYLE_TITLE" "$STYLE_RESET" "$STYLE_DIM" "$STYLE_RESET"
+  print_banner
   if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
     printf '%b请选择操作：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
     menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH 和 Fail2ban'
