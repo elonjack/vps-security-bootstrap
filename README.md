@@ -1,113 +1,89 @@
 # Debian VPS 安全初始化（Debian 12 / 13）
 
-这是给新 VPS 用的 SSH 安全初始化脚本。它会创建一个只能用 SSH 公钥登录的管理员、关闭 root 和 SSH 密码登录、启用 Fail2ban，并开启系统安全更新。
+这是一个交互式的一键安全初始化脚本。它会创建一个新的管理员账号、只允许 SSH 公钥登录、关闭 root 和 SSH 密码登录、启用 Fail2ban 与自动安全更新。
 
-适用：**Debian 12、Debian 13、systemd**。请在全新或你清楚现有 SSH 设置的 VPS 上使用。
+适用范围：**Debian 12、Debian 13、systemd**。请在新 VPS，或你确认现有 SSH 配置可被替换的 VPS 上使用。
 
-## 运行前，先做这 3 件事
+## 只需这样运行
 
-1. 在自己的电脑生成 SSH 密钥（已有密钥可跳过）：
-
-   ```bash
-   ssh-keygen -t ed25519 -a 64 -f ~/.ssh/my_vps
-   ```
-
-   会生成私钥 `~/.ssh/my_vps` 和公钥 `~/.ssh/my_vps.pub`。**私钥永远不要上传或发送给别人。**
-
-2. 在云厂商防火墙/安全组中放行你要用的 SSH 端口，例如 `52022/tcp`。同时先保留默认 `22/tcp`，直到新登录测试成功。
-
-3. 将 `my_vps.pub` 和本仓库的 `bootstrap.sh` 上传到 VPS。例如从你的电脑执行：
-
-   ```bash
-   scp ~/.ssh/my_vps.pub root@服务器IP:/root/my_vps.pub
-   scp bootstrap.sh root@服务器IP:/root/bootstrap.sh
-   ```
-
-   如果已经把 `bootstrap.sh` 下载到 VPS，只需确保公钥文件在 `/root/my_vps.pub`。
-
-## 一条命令执行
-
-先保持当前 SSH 窗口不要关闭，在 VPS 运行：
+先保持当前 SSH 窗口不要关闭，在 VPS 中执行：
 
 ```bash
-sudo bash /root/bootstrap.sh \
-  --public-key-file /root/my_vps.pub \
-  --admin-user admin \
-  --ssh-port 52022
+curl -fsSLO https://raw.githubusercontent.com/elonjack/vps-security-bootstrap/main/bootstrap.sh
+sudo bash bootstrap.sh
 ```
 
-脚本会要求你输入两次 **sudo 密码**。它只用于执行 `sudo`，不会开启 SSH 密码登录。
+不用再事先上传 `.pub` 文件，也不用拼一长串参数。脚本会逐项提问并在真正修改前让你确认。
 
-脚本会：更新系统、安装 OpenSSH/Fail2ban、创建 `admin`、写入 SSH 加固配置、启动 Fail2ban，并创建 10 分钟 SSH 自动回滚保护。
+> 若系统没有 `curl`，可先执行 `sudo apt-get update && sudo apt-get install -y curl`，或者从仓库页面下载 `bootstrap.sh` 后运行 `sudo bash bootstrap.sh`。
 
-## 必须验证并确认
+## 运行前只准备一件事：SSH 公钥
 
-在**新的本机终端**测试，不要关闭原 SSH 窗口：
+如果你现在就是用 SSH 公钥登录 root，向导会自动发现它；直接选择“复用”即可。
+
+如果你目前通过密码登录，在自己的电脑上生成密钥（已有密钥可跳过）：
 
 ```bash
-ssh -i ~/.ssh/my_vps -p 52022 admin@服务器IP
+ssh-keygen -t ed25519 -a 64
 ```
 
-进入成功后执行：
+复制公钥内容，随后粘贴进向导：
+
+```bash
+cat ~/.ssh/id_ed25519.pub
+```
+
+**不要上传、粘贴或发送私钥**（没有 `.pub` 后缀的那个文件）。
+
+## 向导会问什么
+
+1. 管理员使用哪把 SSH 公钥：复用 root 现有公钥、直接粘贴，或读取服务器上的 `.pub` 文件。
+2. 新管理员用户名，默认 `admin`。
+3. SSH 端口。默认保持服务器当前端口（通常为 `22`），这样不会因为云厂商安全组未放行新端口而失联。
+4. 固定管理 IP 是否加入 Fail2ban 白名单（没有可直接回车）。
+5. 是否立即更新系统、是否启用 Telegram 通知（均可选）。
+6. 确认摘要后，为新管理员设置 sudo 密码两次。这个密码**只用于 sudo，不会重新开启 SSH 密码登录**。
+
+如果你改了 SSH 端口，必须先在云厂商安全组/防火墙中放行新端口；脚本也会再次要求确认。
+
+## 完成后必须验证
+
+脚本会保留 10 分钟的 SSH 自动回滚保护。请新开一个本地终端（不要关闭原 SSH 窗口）测试：
+
+```bash
+ssh -i ~/.ssh/id_ed25519 -p 22 admin@服务器IP
+```
+
+将 `22`、`admin` 改为你在向导中选的值。登录成功后执行：
 
 ```bash
 sudo /usr/local/sbin/vps-security-confirm
 ```
 
-这会取消自动回滚。若 10 分钟内没有确认，脚本只恢复它写入的 SSH 配置，避免因端口或密钥问题失去访问权限。
+这会取消回滚保护。若你因为公钥或端口设置错误而无法新登录，等待 10 分钟后，脚本写入的 SSH 配置会自动还原。
 
-## 常用选项
+## 它实际做了什么
 
-| 需求 | 参数 |
-| --- | --- |
-| 改 SSH 端口 | `--ssh-port 2222` |
-| 改管理员名 | `--admin-user alice` |
-| 自动化运行，不想交互输入 sudo 密码 | `--admin-password-file /root/admin-password` |
-| 明确接受私钥失窃即可 root 的风险 | `--allow-nopasswd-sudo` |
-| 暂时跳过本次系统升级 | `--skip-system-upgrade` |
-| 不创建 SSH 自动回滚 | `--no-rollback`（不推荐） |
-| 对某固定办公 IP 不执行 Fail2ban 封禁 | `--ignoreip '203.0.113.0/24'` |
+- 创建或更新指定管理员，并只授权所选 SSH 公钥。
+- 禁止 root、SSH 密码和键盘交互登录；关闭 SSH 转发、X11、隧道等高风险功能。
+- 使用 Fail2ban：10 分钟内失败 3 次会封禁，封禁会逐次延长，最长 4 周。
+- 安装 OpenSSH、Fail2ban、nftables、sudo、unattended-upgrades，并启用 Debian 自动安全更新。
+- 修改前备份自己管理的配置到 `/etc/vps-security/backups/`，并在重载 SSH 前验证最终生效配置。
 
-`--admin-password-file` 必须由 root 所有，权限必须为 `0600` 或更严格。创建示例：
+脚本**不会**替你改云厂商安全组或清空现有防火墙规则；这类操作因环境不同容易造成断连，需要你自行确认。
 
-```bash
-sudo install -m 600 /dev/null /root/admin-password
-sudoedit /root/admin-password
-```
+## 自动化部署（可选）
 
-## Telegram 通知（可选）
-
-准备两个仅 root 可读的单行文件：
+批量部署仍可使用参数模式；此时不会进入向导：
 
 ```bash
-sudo install -m 600 /dev/null /root/tg-token
-sudo install -m 600 /dev/null /root/tg-chat-id
-sudoedit /root/tg-token
-sudoedit /root/tg-chat-id
+sudo bash bootstrap.sh \
+  --public-key-file /root/admin.pub \
+  --admin-user admin \
+  --ssh-port 22
 ```
 
-然后在运行命令后增加：
-
-```bash
---telegram-token-file /root/tg-token \
---telegram-chat-id-file /root/tg-chat-id
-```
-
-不要把 Telegram token 放到命令行、聊天记录或截图里。
-
-## 脚本实际设置了什么
-
-- 仅允许指定管理员通过 SSH 公钥登录。
-- 禁止 root、SSH 密码、键盘交互登录，以及 SSH 转发、X11、隧道。
-- SSH 登录失败 3 次后由 Fail2ban 封禁；默认封禁从 1 天开始逐次延长，最多 4 周。
-- 启用 Debian 自动安全更新；使用 `--skip-system-upgrade` 只跳过这次立即升级，不关闭自动更新。
-- 每次运行都会备份它管理的文件到 `/etc/vps-security/backups/`。
-
-## 仍需要你自己做的事
-
-- 在云安全组和主机防火墙中，仅开放 SSH 新端口和实际业务端口（如 80/443）。脚本不会擅自覆盖你的防火墙规则。
-- 为 VPS 配置备份；Fail2ban 不能替代备份。
-- 妥善保存私钥；丢失私钥或服务器控制台访问权会造成恢复困难。
+非交互运行还应通过 `--admin-password-file /root/admin-password` 提供管理员 sudo 密码。该文件必须归 root 所有、权限为 `0600` 或更严格。Telegram 凭据也请使用 `--telegram-token-file` 与 `--telegram-chat-id-file`，不要出现在命令行历史中。
 
 常用检查命令：
 

@@ -27,8 +27,18 @@ BANTIME=1d
 ROLLBACK_SECONDS=600
 SCHEDULE_ROLLBACK=1
 SYSTEM_UPGRADE=1
+INTERACTIVE=0
+INTERACTIVE_FLAG=0
+ORIGINAL_ARGC=$#
 
 usage() {
+  cat <<'EOF'
+
+普通用法（推荐，逐项填写）：
+  sudo bash bootstrap.sh
+
+自动化用法（传入参数，不进入向导）：
+EOF
   cat <<'EOF'
 用法：
   sudo bash bootstrap.sh --public-key-file /path/to/id_ed25519.pub [选项]
@@ -38,8 +48,9 @@ usage() {
   --public-key 'ssh-ed25519 …' 管理员 SSH 公钥文本
 
 选项：
+  --interactive                强制进入交互式向导（即使同时提供其他参数）
   --admin-user NAME            新建的唯一 SSH 管理用户，默认：admin
-  --ssh-port PORT              SSH 端口，默认：52022
+  --ssh-port PORT              SSH 端口；参数模式默认：52022
   --ignoreip CIDR[,CIDR...]    Fail2ban 永不封禁的可信 IP/CIDR（可选）
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
@@ -57,6 +68,7 @@ need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 需要一个值"; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --interactive) INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     --public-key-file) need_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --public-key) need_value "$@"; PUBLIC_KEY=$2; shift 2 ;;
     --admin-password-file) need_value "$@"; ADMIN_PASSWORD_FILE=$2; shift 2 ;;
@@ -77,6 +89,128 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
+[ "$ORIGINAL_ARGC" -eq 0 ] && INTERACTIVE=1
+[ "$INTERACTIVE_FLAG" -eq 0 ] || [ "$ORIGINAL_ARGC" -eq 1 ] || die '--interactive 不能与其他参数同时使用。'
+
+prompt_default() {
+  local variable=$1 prompt=$2 default=$3 value
+  read -r -p "$prompt [$default]: " value
+  printf -v "$variable" '%s' "${value:-$default}"
+}
+
+ask_yes_no() {
+  local prompt=$1 default=${2:-y} answer
+  while true; do
+    if [ "$default" = y ]; then
+      read -r -p "$prompt [Y/n]: " answer
+      answer=${answer:-y}
+    else
+      read -r -p "$prompt [y/N]: " answer
+      answer=${answer:-n}
+    fi
+    case "$answer" in
+      y|Y|yes|YES) return 0 ;;
+      n|N|no|NO) return 1 ;;
+      *) echo '请输入 y 或 n。' ;;
+    esac
+  done
+}
+
+detect_current_ssh_port() {
+  if command -v sshd >/dev/null 2>&1 && sshd -T >/dev/null 2>&1; then
+    sshd -T | awk '$1 == "port" { print $2; exit }'
+  else
+    printf '22'
+  fi
+}
+
+choose_public_key_interactively() {
+  local -a root_keys=()
+  local choice index key_path i
+  if [ -r /root/.ssh/authorized_keys ]; then
+    mapfile -t root_keys < <(grep -E '^(ssh-(ed25519|rsa|ecdsa)|sk-ssh-ed25519)' /root/.ssh/authorized_keys || true)
+  fi
+  if [ "${#root_keys[@]}" -gt 0 ]; then
+    echo '检测到 root 当前已授权的 SSH 公钥。'
+    echo '1) 复用其中一把公钥（推荐）'
+    echo '2) 粘贴一整行新的 SSH 公钥'
+    echo '3) 输入服务器上 .pub 公钥文件的路径'
+    prompt_default choice '请选择公钥来源' '1'
+  else
+    echo '未检测到 root 已授权的公钥。'
+    echo '1) 粘贴一整行 SSH 公钥（推荐）'
+    echo '2) 输入服务器上 .pub 公钥文件的路径'
+    prompt_default choice '请选择公钥来源' '1'
+    case "$choice" in
+      1) choice=2 ;;
+      2) choice=3 ;;
+    esac
+  fi
+  case "$choice" in
+    1)
+      [ "${#root_keys[@]}" -gt 0 ] || die '没有可复用的 root 公钥。'
+      if [ "${#root_keys[@]}" -eq 1 ]; then
+        PUBLIC_KEY=${root_keys[0]}
+      else
+        echo '请选择要授权给新管理员的公钥：'
+        for i in "${!root_keys[@]}"; do
+          printf '  %s) %s\n' "$((i + 1))" "${root_keys[i]}"
+        done
+        read -r -p '编号 [1]: ' index
+        index=${index:-1}
+        [[ "$index" =~ ^[1-9][0-9]*$ ]] && [ "$index" -le "${#root_keys[@]}" ] || die '公钥编号无效。'
+        PUBLIC_KEY=${root_keys[index - 1]}
+      fi
+      ;;
+    2) read -r -p '粘贴一整行 SSH 公钥：' PUBLIC_KEY ;;
+    3)
+      prompt_default key_path '公钥文件路径' '/root/.ssh/id_ed25519.pub'
+      PUBLIC_KEY_FILE=$key_path
+      ;;
+    *) die '公钥来源选项无效。' ;;
+  esac
+}
+
+interactive_wizard() {
+  local current_port answer
+  [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh'
+  [ -t 0 ] || die '交互式向导需要终端；自动化运行请传入 --public-key-file 等参数。'
+  clear 2>/dev/null || true
+  cat <<'EOF'
+========================================
+ Debian VPS 安全初始化向导（Debian 12 / 13）
+========================================
+将创建仅能使用 SSH 公钥登录的管理员，关闭 root/密码 SSH 登录，
+启用 Fail2ban 和自动安全更新。当前 SSH 连接请保持打开，直到最后验证成功。
+EOF
+  choose_public_key_interactively
+  prompt_default ADMIN_USER '新管理员用户名' "$ADMIN_USER"
+  current_port=$(detect_current_ssh_port)
+  prompt_default SSH_PORT '新的 SSH 端口（默认保持当前端口，避免云防火墙拦截）' "$current_port"
+  if [ "$SSH_PORT" != "$current_port" ]; then
+    echo "注意：你选择将 SSH 端口从 $current_port 改为 $SSH_PORT。"
+    echo '请先在云厂商安全组/防火墙中放行新端口，否则新连接会失败。'
+    ask_yes_no '已确认新端口已放行吗？' n || die '已取消；请先放行新端口后再运行。'
+  fi
+  prompt_default IGNORE_IP 'Fail2ban 永不封禁的固定管理 IP/CIDR（没有就直接回车）' ''
+  if ask_yes_no '现在执行系统软件升级？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
+  if ask_yes_no '启用 Telegram 登录/封禁通知？' n; then
+    read -rsp 'Telegram Bot Token（输入不回显）：' TELEGRAM_TOKEN
+    printf '\n'
+    read -r -p 'Telegram Chat ID：' TELEGRAM_CHAT_ID
+    [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
+  fi
+  echo
+  echo '即将应用以下设置：'
+  echo "  管理员：$ADMIN_USER（仅 SSH 公钥登录）"
+  echo "  SSH 端口：$SSH_PORT"
+  echo "  系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)"
+  echo "  Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)"
+  echo '  SSH 回滚保护：10 分钟内未确认将自动还原本脚本写入的 SSH 配置'
+  read -r -p '确认开始请输入 YES：' answer
+  [ "$answer" = YES ] || die '已取消，未修改系统。'
+}
+
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
 [ -r /etc/debian_version ] || die '此脚本仅面向 Debian 12 或 13。'
 . /etc/os-release
@@ -86,6 +220,7 @@ case "${VERSION_ID%%.*}" in
   *) die '此脚本仅支持 Debian 12 或 13。' ;;
 esac
 [ -d /run/systemd/system ] || die '此脚本需要 systemd。'
+[ "$INTERACTIVE" -eq 0 ] || interactive_wizard
 [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$SSH_PORT" -le 65535 ] || die '--ssh-port 必须是 1–65535。'
 [[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die '--admin-user 格式不正确。'
 [ -z "$PUBLIC_KEY" ] || [ -z "$PUBLIC_KEY_FILE" ] || die '只能使用一种公钥传入方式。'
