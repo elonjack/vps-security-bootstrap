@@ -84,7 +84,7 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 2. 保存 BotFather 返回的 HTTP API Token；它相当于机器人密码，不能分享。
 3. 打开新建的机器人，点击 **Start** 并发送任意一条消息。
 4. 在可信设备浏览器访问 `https://api.telegram.org/bot<你的Token>/getUpdates`，从返回内容的 `message.chat.id` 复制数字 Chat ID。
-5. 在脚本中粘贴 Token、Chat ID，并填写 VPS 名称，例如 `HK-01`。Token 输入时不会回显。
+5. 在脚本中粘贴 Token、Chat ID，并填写 VPS 名称，例如 `HK-01`。粘贴 Token 后，终端不会显示任何字符、星号或长度；这是正常的安全保护，直接按回车即可。Chat ID 会正常显示。
 
 通知会显示名称、主机、root 登录来源 IP、时间，以及 Fail2ban 封禁信息。
 

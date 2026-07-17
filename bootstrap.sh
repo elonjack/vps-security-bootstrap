@@ -162,9 +162,10 @@ Telegram 配置步骤：
   4. 在可信设备的浏览器访问：
        https://api.telegram.org/bot<你的Token>/getUpdates
      在返回内容中找到 message.chat.id，并复制对应的数字作为 Chat ID。
-  5. 下方 Token 输入不会回显；Chat ID 可以正常粘贴。
+  5. 下方粘贴 Token 后，屏幕不会显示字符、星号或长度；这是正常的安全保护。
+     粘贴完成直接按回车即可。Chat ID 可以正常粘贴和显示。
 EOF
-    read -rsp 'Telegram Bot Token（输入不回显）：' TELEGRAM_TOKEN
+    read -rsp 'Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：' TELEGRAM_TOKEN
     printf '\n'
     read -r -p 'Telegram Chat ID：' TELEGRAM_CHAT_ID
     [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
