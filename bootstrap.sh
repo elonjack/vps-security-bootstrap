@@ -31,6 +31,18 @@ INTERACTIVE_FLAG=0
 ROTATE_TELEGRAM=0
 ORIGINAL_ARGC=$#
 
+if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
+  STYLE_RESET=$'\033[0m'
+  STYLE_TITLE=$'\033[1;36m'
+  STYLE_NUMBER=$'\033[1;32m'
+  STYLE_DIM=$'\033[2m'
+else
+  STYLE_RESET=''
+  STYLE_TITLE=''
+  STYLE_NUMBER=''
+  STYLE_DIM=''
+fi
+
 usage() {
   cat <<'EOF'
 
@@ -115,6 +127,16 @@ ask_yes_no() {
   done
 }
 
+menu_option() {
+  local number=$1 title=$2 description=${3:-}
+  if [ -n "$description" ]; then
+    printf '  %b%s.%b %s %b(%s)%b\n' \
+      "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title" "$STYLE_DIM" "$description" "$STYLE_RESET"
+  else
+    printf '  %b%s.%b %s\n' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
+  fi
+}
+
 detect_current_ssh_port() {
   if command -v sshd >/dev/null 2>&1 && sshd -T >/dev/null 2>&1; then
     sshd -T | awk '$1 == "port" { print $2; exit }'
@@ -144,12 +166,10 @@ interactive_wizard() {
 EOF
   if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
     echo
-    echo '请选择操作：'
-    echo '  1) 初次部署 / 重新加固 SSH'
-    echo '     会覆盖 root 公钥、更新 SSH 和 Fail2ban 配置。'
-    echo '  2) 更换 Telegram Bot Token'
-    echo '     不修改 SSH、公钥、端口或 Fail2ban 封禁策略。'
-    echo '  0) 退出，不做任何修改'
+    printf '%b请选择操作：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
+    menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥、更新 SSH 和 Fail2ban 配置'
+    menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban 封禁策略'
+    menu_option 0 '退出，不做任何修改'
     while true; do
       read -r -p '请输入 1、2 或 0：' answer
       case "$answer" in
