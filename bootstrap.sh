@@ -448,18 +448,17 @@ systemctl daemon-reload
 
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
-echo '提示：如系统自动更新正在运行，脚本会等待它完成（最长 10 分钟），请不要删除任何 lock 文件。'
-apt-get -o DPkg::Lock::Timeout=600 update
-[ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get -o DPkg::Lock::Timeout=600 upgrade -y
-apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server fail2ban nftables curl libpam-modules unattended-upgrades
+if [ -f "$AUTO_UPGRADES_CONF" ]; then
+  rm -f "$AUTO_UPGRADES_CONF"
+  echo '提示：已移除本工具旧版创建的后台自动更新设置；以后只执行你在向导中明确确认的一次性更新。'
+fi
+echo '提示：如恰好有其他软件更新正在结束，脚本最多等待 1 分钟；请不要删除任何 lock 文件。'
+apt-get -o DPkg::Lock::Timeout=60 update
+[ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get -o DPkg::Lock::Timeout=60 upgrade -y
+apt-get -o DPkg::Lock::Timeout=60 install -y openssh-server fail2ban nftables curl libpam-modules
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
 printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
-cat > "$AUTO_UPGRADES_CONF" <<'EOF'
-APT::Periodic::Update-Package-Lists "1";
-APT::Periodic::Unattended-Upgrade "1";
-EOF
-
 info '覆盖 root 的 SSH 公钥（仅保留本次提供的公钥）'
 install -d -o root -g root -m 0700 /root/.ssh
 printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
