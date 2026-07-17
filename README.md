@@ -1,98 +1,97 @@
-# Debian VPS 安全初始化（Debian 12 / 13）
+# Debian VPS 安全初始化（Debian 12 / 13，root 专用）
 
-交互式的一键安全初始化脚本：创建管理员、仅允许 SSH 公钥登录、关闭 root 与 SSH 密码登录、启用 Fail2ban、自动安全更新，以及可选的 Telegram 通知。
+这是 root 专用的交互式初始化脚本：只允许 `root` 使用 SSH 公钥登录，关闭 SSH 密码登录，启用 Fail2ban、自动安全更新和可选 Telegram 通知。脚本**不会创建新的 SSH 用户**。
 
-适用范围：**Debian 12、Debian 13、systemd**。请在新 VPS，或你确认现有 SSH 配置可被替换的 VPS 上使用。
+适用范围：**Debian 12、Debian 13、systemd**。请在新 VPS，或你明确知道现有 SSH 配置可被替换的 VPS 上使用。
+
+> 直接使用 root 的代价是：私钥一旦泄露，攻击者直接拥有最高权限。请为这台 VPS 使用专用、强口令保护的私钥，且不要共享。
 
 ## 只需这样运行
 
-保持当前 SSH 窗口不要关闭，在 VPS 执行：
+保持当前 root SSH 窗口不要关闭，在 VPS 执行：
 
 ```bash
 curl -fsSLO https://raw.githubusercontent.com/elonjack/vps-security-bootstrap/main/bootstrap.sh
-sudo bash bootstrap.sh
+bash bootstrap.sh
 ```
 
-脚本会进入中文向导，不必提前上传 `.pub` 文件，也不用拼一长串参数。
+脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。
 
-> 没有 `curl` 时，可先运行 `sudo apt-get update && sudo apt-get install -y curl`，或下载 `bootstrap.sh` 后运行 `sudo bash bootstrap.sh`。
+## 如何准备并粘贴公钥
 
-## 运行前只准备 SSH 公钥
-
-若你当前已通过 SSH 公钥登录 root，向导会发现它，选择“复用”即可。
-
-若你当前用密码登录，在自己的电脑生成密钥（已有可跳过）：
+在**你自己的电脑**生成密钥（已有专用密钥可跳过）：
 
 ```bash
 ssh-keygen -t ed25519 -a 64
 cat ~/.ssh/id_ed25519.pub
 ```
 
-把第二条命令显示的一整行**公钥**粘贴到向导。不要上传、发送或粘贴私钥（没有 `.pub` 后缀的文件）。
+第二条命令会显示一整行文本，例如：
 
-## 向导会问什么
+```text
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... your-computer
+```
 
-1. 管理员使用哪把 SSH 公钥：复用 root 现有公钥、直接粘贴，或读取服务器上的 `.pub` 文件。
-2. 新管理员用户名，默认 `admin`。
-3. SSH 端口。默认保持当前端口（通常是 `22`），避免云安全组未放行新端口时失联。
-4. Fail2ban 白名单（固定管理 IP，没有可直接回车）。
-5. 是否立即更新系统、是否启用 Telegram。
-6. 确认摘要后，为管理员设置 sudo 密码两次；它**不会**开启 SSH 密码登录。
+运行脚本后，出现 `root SSH 公钥：` 时，把这一整行粘贴进去并按回车。**只能粘贴 `.pub` 文件内容；绝不能粘贴私钥 `id_ed25519`。**
 
-改 SSH 端口前，必须先在云厂商安全组/防火墙中放行新端口；脚本会再次确认。
+Windows PowerShell 可用：
 
-## Telegram 通知与 VPS 名称
+```powershell
+Get-Content $HOME\.ssh\id_ed25519.pub
+```
 
-启用 Telegram 后，向导会要求填写一个 VPS 名称，例如 `HK-01`、`东京-博客`。每条通知会以该名称置顶，包含主机、用户、来源 IP、封禁时长与历史封禁次数，方便一个聊天同时观察多台服务器。
+## 向导流程
 
-**同一个 Bot Token 可以用于多台 VPS 的通知**：为每台机器设置不同名称即可。请确保接收通知的聊天仅对可信成员开放，因为通知包含来源 IP。
+1. 粘贴 root 的 SSH 公钥。
+2. 选择 SSH 端口；默认保持当前端口，避免云安全组未放行新端口时失联。
+3. 可选填写 Fail2ban 白名单、立即系统更新和 Telegram 通知。
+4. 查看摘要并输入 `YES`。
+5. 脚本安装组件、将公钥加入 `/root/.ssh/authorized_keys`、只允许 root 公钥登录、启动 Fail2ban。
 
-### 收到未知“登录成功”通知怎么办
-
-不要只封禁该 IP：攻击者可能换 IP，而且成功登录意味着某把已授权公钥、账号或服务器本身可能已失陷。应先通过云厂商控制台或另一条可信连接保留访问，再撤销可疑公钥、检查 SSH 与 sudo 记录、轮换密钥；无法确认影响范围时，建议从可信镜像重建主机并恢复已验证的数据。
-
-## 封禁策略
-
-- SSH 登录失败 3 次/10 分钟：开始递增封禁，初始 1 天，随后逐步延长，最高 4 周。
-- 同一 IP 在 **30 天内累计触发 5 次完整封禁**：`recidive` jail 将对该 IP **永久封禁所有端口**。
-不把每次爆破都永久封禁，是为了降低动态公网 IP、误输密码或共享出口地址造成的长期误伤；对持续反复攻击者则会自动升级为永久封禁。
+现有 root 公钥不会被清空，脚本只会补充你本次粘贴的公钥；原文件会备份到 `/etc/vps-security/backups/`。
 
 ## 完成后必须验证
 
-脚本保留 10 分钟 SSH 自动回滚保护。请新开一个本地终端（不要关闭原 SSH 窗口）测试：
+脚本会创建 10 分钟的 SSH 自动回滚保护。请新开本地终端（不要关闭当前 root 窗口）测试：
 
 ```bash
-ssh -i ~/.ssh/id_ed25519 -p 22 admin@服务器IP
+ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 ```
 
-将端口与用户名改为向导中的值。成功登录后执行：
+把端口改成向导里的值。登录成功后，在新连接中执行：
 
 ```bash
-sudo /usr/local/sbin/vps-security-confirm
+/usr/local/sbin/vps-security-confirm
 ```
 
-这会取消回滚保护。若公钥或端口有误导致无法新登录，10 分钟后脚本写入的 SSH 配置会自动还原。
+这会取消自动回滚。若公钥或端口设置有误，10 分钟内没有确认时，脚本写入的 SSH 配置会自动还原。
 
-## 它实际做了什么
+## 最终 SSH 策略
 
-- 创建或更新指定管理员，并只授权所选 SSH 公钥。
-- 禁止 root、SSH 密码、键盘交互登录，以及 SSH 转发、X11、隧道。
-- 使用 nftables 后端的 Fail2ban，启用递增封禁和针对持续攻击者的永久 `recidive` 封禁。
-- 安装 OpenSSH、Fail2ban、nftables、curl、sudo、unattended-upgrades，并启用 Debian 自动安全更新。
-- 备份本工具管理的配置到 `/etc/vps-security/backups/`，并在重载 SSH 前验证最终生效配置。
+- 仅允许 `root` 用户通过 SSH 登录。
+- 仅允许公钥认证；SSH 密码和键盘交互登录均被禁用。
+- 禁用 SSH 转发、X11、隧道等高风险功能。
+- `PermitRootLogin yes` 只用于允许 root 公钥认证；由于同时强制 `AuthenticationMethods publickey` 和关闭密码认证，它不允许 root 使用 SSH 密码进入。
 
-脚本不会修改云厂商安全组或清空现有防火墙规则；这类操作因环境不同容易造成断连，需要你自行确认。
+## Telegram 通知与 VPS 名称
+
+启用 Telegram 后，向导会要求填写 VPS 名称，例如 `HK-01`。通知会显示名称、主机、root 登录来源 IP、时间，以及 Fail2ban 封禁信息。
+
+同一个 Bot Token 可以用于多台 VPS 的**通知**，为每台机器使用不同名称即可。接收通知的聊天应仅包含可信成员，因为消息含有来源 IP。
+
+如果收到不认识的 root 登录成功通知，应视为私钥或服务器可能失陷：先通过云控制台或另一条可信连接保留访问，撤销可疑公钥、检查 SSH 日志、轮换密钥；无法确认影响范围时建议从可信镜像重建。
+
+## 封禁策略
+
+- SSH 10 分钟内失败 3 次：开始递增封禁，初始 1 天，最高 4 周。
+- 同一 IP 在 30 天内累计触发 5 次完整封禁：`recidive` jail 永久封禁该 IP 的所有端口。
 
 ## 自动化部署（可选）
 
-带参数运行不会进入向导：
-
 ```bash
-sudo bash bootstrap.sh \
-  --public-key-file /root/admin.pub \
-  --admin-user admin \
-  --ssh-port 22 \
-  --admin-password-file /root/admin-password
+bash bootstrap.sh \
+  --public-key-file /root/root-login.pub \
+  --ssh-port 22
 ```
 
 Telegram 自动化参数：
@@ -103,12 +102,13 @@ Telegram 自动化参数：
 --telegram-vps-name 'HK-01'
 ```
 
-密码和 Telegram 凭据文件必须归 root 所有、权限为 `0600` 或更严格；不要把它们放进命令行历史。
+Telegram 凭据文件必须归 root 所有、权限为 `0600` 或更严格；不要把 Token 放进命令行历史。
 
 常用检查命令：
 
 ```bash
-sudo sshd -t
-sudo fail2ban-client status sshd
-sudo fail2ban-client status recidive
+sshd -t
+sshd -T | grep -E '^(port|permitrootlogin|allowusers|passwordauthentication|pubkeyauthentication) '
+fail2ban-client status sshd
+fail2ban-client status recidive
 ```

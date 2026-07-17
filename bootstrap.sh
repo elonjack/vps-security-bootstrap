@@ -17,11 +17,8 @@ readonly LEGACY_TELEGRAM_CONTROL_SERVICE='/etc/systemd/system/vps-security-teleg
 readonly CONFIRM='/usr/local/sbin/vps-security-confirm'
 readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/52-vps-security-bootstrap-auto-upgrades'
 SSH_PORT=52022
-ADMIN_USER=admin
 PUBLIC_KEY=''
 PUBLIC_KEY_FILE=''
-ADMIN_PASSWORD_FILE=''
-ALLOW_NOPASSWD_SUDO=0
 IGNORE_IP=''
 TELEGRAM_TOKEN=''
 TELEGRAM_CHAT_ID=''
@@ -49,19 +46,16 @@ EOF
   sudo bash bootstrap.sh --public-key-file /path/to/id_ed25519.pub [选项]
 
 必填（二选一）：
-  --public-key-file PATH       管理员 SSH 公钥文件（推荐）
-  --public-key 'ssh-ed25519 …' 管理员 SSH 公钥文本
+  --public-key-file PATH       root 的 SSH 公钥文件
+  --public-key 'ssh-ed25519 …' root 的 SSH 公钥文本
 
 选项：
   --interactive                强制进入交互式向导（不可与其他参数同时使用）
-  --admin-user NAME            新建的唯一 SSH 管理用户，默认：admin
   --ssh-port PORT              SSH 端口；参数模式默认：52022
   --ignoreip CIDR[,CIDR...]    Fail2ban 永不封禁的可信 IP/CIDR（可选）
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
   --telegram-vps-name NAME     Telegram 中显示的 VPS 名称（默认：主机名）
-  --admin-password-file PATH   自动化运行时从单行文件读取管理员 sudo 密码
-  --allow-nopasswd-sudo         允许管理员免密 sudo（不推荐；私钥失窃即获得 root）
   --permanent-bans             永久封禁（不推荐，默认逐级延长至 4 周）
   --skip-system-upgrade        跳过本次 apt upgrade（不推荐；仍安装所需软件包）
   --no-rollback                不创建 10 分钟自动回滚保护（不推荐）
@@ -77,9 +71,6 @@ while [ "$#" -gt 0 ]; do
     --interactive) INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     --public-key-file) need_value "$@"; PUBLIC_KEY_FILE=$2; shift 2 ;;
     --public-key) need_value "$@"; PUBLIC_KEY=$2; shift 2 ;;
-    --admin-password-file) need_value "$@"; ADMIN_PASSWORD_FILE=$2; shift 2 ;;
-    --allow-nopasswd-sudo) ALLOW_NOPASSWD_SUDO=1; shift ;;
-    --admin-user) need_value "$@"; ADMIN_USER=$2; shift 2 ;;
     --ssh-port) need_value "$@"; SSH_PORT=$2; shift 2 ;;
     --ignoreip) need_value "$@"; IGNORE_IP=$2; shift 2 ;;
     --telegram-token|--telegram-chat-id)
@@ -131,51 +122,11 @@ detect_current_ssh_port() {
   fi
 }
 
-choose_public_key_interactively() {
-  local -a root_keys=()
-  local choice index key_path i
-  if [ -r /root/.ssh/authorized_keys ]; then
-    mapfile -t root_keys < <(grep -E '^(ssh-(ed25519|rsa|ecdsa)|sk-ssh-ed25519)' /root/.ssh/authorized_keys || true)
-  fi
-  if [ "${#root_keys[@]}" -gt 0 ]; then
-    echo '检测到 root 当前已授权的 SSH 公钥。'
-    echo '1) 复用其中一把公钥（推荐）'
-    echo '2) 粘贴一整行新的 SSH 公钥'
-    echo '3) 输入服务器上 .pub 公钥文件的路径'
-    prompt_default choice '请选择公钥来源' '1'
-  else
-    echo '未检测到 root 已授权的公钥。'
-    echo '1) 粘贴一整行 SSH 公钥（推荐）'
-    echo '2) 输入服务器上 .pub 公钥文件的路径'
-    prompt_default choice '请选择公钥来源' '1'
-    case "$choice" in
-      1) choice=2 ;;
-      2) choice=3 ;;
-    esac
-  fi
-  case "$choice" in
-    1)
-      [ "${#root_keys[@]}" -gt 0 ] || die '没有可复用的 root 公钥。'
-      if [ "${#root_keys[@]}" -eq 1 ]; then
-        PUBLIC_KEY=${root_keys[0]}
-      else
-        echo '请选择要授权给新管理员的公钥：'
-        for i in "${!root_keys[@]}"; do
-          printf '  %s) %s\n' "$((i + 1))" "${root_keys[i]}"
-        done
-        read -r -p '编号 [1]: ' index
-        index=${index:-1}
-        [[ "$index" =~ ^[1-9][0-9]*$ ]] && [ "$index" -le "${#root_keys[@]}" ] || die '公钥编号无效。'
-        PUBLIC_KEY=${root_keys[index - 1]}
-      fi
-      ;;
-    2) read -r -p '粘贴一整行 SSH 公钥：' PUBLIC_KEY ;;
-    3)
-      prompt_default key_path '公钥文件路径' '/root/.ssh/id_ed25519.pub'
-      PUBLIC_KEY_FILE=$key_path
-      ;;
-    *) die '公钥来源选项无效。' ;;
-  esac
+prompt_for_public_key() {
+  echo
+  echo '请从你的电脑复制 .pub 文件的完整一行内容，然后粘贴到下方并按回车。'
+  echo '示例：ssh-ed25519 AAAA... your-computer'
+  read -r -p 'root SSH 公钥：' PUBLIC_KEY
 }
 
 interactive_wizard() {
@@ -187,11 +138,11 @@ interactive_wizard() {
 ========================================
  Debian VPS 安全初始化向导（Debian 12 / 13）
 ========================================
-将创建仅能使用 SSH 公钥登录的管理员，关闭 root/密码 SSH 登录，
+将保留 root 作为唯一 SSH 用户，只允许你提供的 SSH 公钥登录，
+关闭 SSH 密码登录，
 启用 Fail2ban 和自动安全更新。当前 SSH 连接请保持打开，直到最后验证成功。
 EOF
-  choose_public_key_interactively
-  prompt_default ADMIN_USER '新管理员用户名' "$ADMIN_USER"
+  prompt_for_public_key
   current_port=$(detect_current_ssh_port)
   prompt_default SSH_PORT '新的 SSH 端口（默认保持当前端口，避免云防火墙拦截）' "$current_port"
   if [ "$SSH_PORT" != "$current_port" ]; then
@@ -210,7 +161,7 @@ EOF
   fi
   echo
   echo '即将应用以下设置：'
-  echo "  管理员：$ADMIN_USER（仅 SSH 公钥登录）"
+  echo '  SSH 用户：root（仅 SSH 公钥登录）'
   echo "  SSH 端口：$SSH_PORT"
   echo "  系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)"
   echo "  Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)"
@@ -231,7 +182,6 @@ esac
 [ -d /run/systemd/system ] || die '此脚本需要 systemd。'
 [ "$INTERACTIVE" -eq 0 ] || interactive_wizard
 [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$SSH_PORT" -le 65535 ] || die '--ssh-port 必须是 1–65535。'
-[[ "$ADMIN_USER" =~ ^[a-z_][a-z0-9_-]{0,31}$ ]] || die '--admin-user 格式不正确。'
 [ -z "$PUBLIC_KEY" ] || [ -z "$PUBLIC_KEY_FILE" ] || die '只能使用一种公钥传入方式。'
 require_root_private_file() {
   local path=$1 label=$2 owner mode
@@ -241,7 +191,6 @@ require_root_private_file() {
   [ "$owner" -eq 0 ] || die "$label 文件必须由 root 所有：$path"
   (( (8#$mode & 077) == 0 )) || die "$label 文件权限必须是 0600 或更严格：$path"
 }
-[ -z "$ADMIN_PASSWORD_FILE" ] || require_root_private_file "$ADMIN_PASSWORD_FILE" '管理员密码'
 [ -z "$TELEGRAM_TOKEN_FILE" ] || { require_root_private_file "$TELEGRAM_TOKEN_FILE" 'Telegram token'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
 [ -z "$TELEGRAM_CHAT_ID_FILE" ] || { require_root_private_file "$TELEGRAM_CHAT_ID_FILE" 'Telegram chat id'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
 [ -n "$TELEGRAM_TOKEN" ] && [ -z "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
@@ -249,26 +198,11 @@ require_root_private_file() {
 [ -z "$TELEGRAM_TOKEN" ] || TELEGRAM_VPS_NAME=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
 [ -z "$TELEGRAM_VPS_NAME" ] || [[ "$TELEGRAM_VPS_NAME" != *$'\n'* && "$TELEGRAM_VPS_NAME" != *$'\r'* && ${#TELEGRAM_VPS_NAME} -le 80 ]] || die 'Telegram VPS 名称不能包含换行，且最多 80 个字符。'
 
-if [ -n "$ADMIN_PASSWORD_FILE" ]; then
-  ADMIN_PASSWORD=$(head -n 1 "$ADMIN_PASSWORD_FILE")
-  [ -n "$ADMIN_PASSWORD" ] || die '管理员密码文件的第一行不能为空。'
-elif [ "$ALLOW_NOPASSWD_SUDO" -eq 0 ]; then
-  [ -t 0 ] || die '非交互运行时请使用 --admin-password-file，或明确传入 --allow-nopasswd-sudo。'
-  read -rsp "为 $ADMIN_USER 设置 sudo 密码（不会用于 SSH 登录）：" ADMIN_PASSWORD
-  printf '\n'
-  read -rsp '再次输入 sudo 密码：' ADMIN_PASSWORD_CONFIRM
-  printf '\n'
-  [ -n "$ADMIN_PASSWORD" ] || die 'sudo 密码不能为空。'
-  [ "$ADMIN_PASSWORD" = "$ADMIN_PASSWORD_CONFIRM" ] || die '两次输入的 sudo 密码不一致。'
-  unset ADMIN_PASSWORD_CONFIRM
-fi
-[ "$ALLOW_NOPASSWD_SUDO" -eq 1 ] || [[ "$ADMIN_PASSWORD" != *:* ]] || die 'sudo 密码不能包含冒号。'
-
 if [ -n "$PUBLIC_KEY_FILE" ]; then
   [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
   PUBLIC_KEY=$(grep -E '^(ssh-(ed25519|rsa|ecdsa)|sk-ssh-ed25519)' "$PUBLIC_KEY_FILE" | head -n 1 || true)
 fi
-[ -n "$PUBLIC_KEY" ] || die '请用 --public-key-file 提供 .pub 公钥。'
+[ -n "$PUBLIC_KEY" ] || die '请粘贴或通过 --public-key-file 提供 .pub 公钥。'
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
@@ -279,6 +213,7 @@ backup_if_exists() { [ -e "$1" ] && cp -a "$1" "$BACKUP_DIR/$2" || true; }
 backup_if_exists "$SSH_DROPIN" ssh-dropin.before
 backup_if_exists "$LEGACY_SSH_DROPIN" ssh-dropin-legacy.before
 backup_if_exists /etc/pam.d/sshd pam-sshd.before
+backup_if_exists /root/.ssh/authorized_keys root-authorized-keys.before
 backup_if_exists "$F2B_JAIL" fail2ban-jail.before
 backup_if_exists "$F2B_ACTION" fail2ban-action.before
 backup_if_exists "$F2B_RECIDIVE_JAIL" fail2ban-recidive-jail.before
@@ -301,7 +236,7 @@ info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
 apt-get update
 [ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get upgrade -y
-apt-get install -y openssh-server fail2ban nftables curl sudo libpam-modules unattended-upgrades
+apt-get install -y openssh-server fail2ban nftables curl libpam-modules unattended-upgrades
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
 printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
@@ -310,31 +245,12 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-info "创建/更新管理员用户：$ADMIN_USER"
-id "$ADMIN_USER" >/dev/null 2>&1 || adduser --disabled-password --gecos '' "$ADMIN_USER"
-USER_HOME=$(getent passwd "$ADMIN_USER" | cut -d: -f6)
-[ -n "$USER_HOME" ] || die "无法确定 $ADMIN_USER 的家目录。"
-usermod -aG sudo "$ADMIN_USER"
-passwd -l "$ADMIN_USER" >/dev/null 2>&1 || true
-install -d -o "$ADMIN_USER" -g "$ADMIN_USER" -m 0700 "$USER_HOME/.ssh"
-touch "$USER_HOME/.ssh/authorized_keys"
-grep -Fqx "$PUBLIC_KEY" "$USER_HOME/.ssh/authorized_keys" || printf '%s\n' "$PUBLIC_KEY" >> "$USER_HOME/.ssh/authorized_keys"
-chown "$ADMIN_USER:$ADMIN_USER" "$USER_HOME/.ssh/authorized_keys"
-chmod 0600 "$USER_HOME/.ssh/authorized_keys"
-SUDO_RULE='ALL'
-if [ "$ALLOW_NOPASSWD_SUDO" -eq 1 ]; then
-  SUDO_RULE='NOPASSWD: ALL'
-fi
-cat > "/etc/sudoers.d/90-$APP-$ADMIN_USER" <<EOF
-# 仅授予明确创建的管理员完整 sudo 权限。
-$ADMIN_USER ALL=(ALL:ALL) $SUDO_RULE
-EOF
-chmod 0440 "/etc/sudoers.d/90-$APP-$ADMIN_USER"
-visudo -cf "/etc/sudoers.d/90-$APP-$ADMIN_USER" >/dev/null
-if [ "$ALLOW_NOPASSWD_SUDO" -eq 0 ]; then
-  printf '%s:%s\n' "$ADMIN_USER" "$ADMIN_PASSWORD" | chpasswd
-  unset ADMIN_PASSWORD
-fi
+info '写入 root 的 SSH 公钥'
+install -d -o root -g root -m 0700 /root/.ssh
+touch /root/.ssh/authorized_keys
+grep -Fqx "$PUBLIC_KEY" /root/.ssh/authorized_keys || printf '%s\n' "$PUBLIC_KEY" >> /root/.ssh/authorized_keys
+chown root:root /root/.ssh/authorized_keys
+chmod 0600 /root/.ssh/authorized_keys
 
 info '写入 SSH 加固配置（只管理自己的 drop-in 文件）'
 install -d -m 0755 /etc/ssh/sshd_config.d
@@ -344,8 +260,8 @@ rm -f "$LEGACY_SSH_DROPIN"
 cat > "$SSH_DROPIN" <<EOF
 # Managed by $APP.
 Port $SSH_PORT
-PermitRootLogin no
-AllowUsers $ADMIN_USER
+PermitRootLogin yes
+AllowUsers root
 PubkeyAuthentication yes
 AuthenticationMethods publickey
 PasswordAuthentication no
@@ -386,8 +302,8 @@ assert_sshd_single_value() {
     die "SSH 最终配置 $key 应为 '$expected'，实际为 '${actual:-<未设置>}'；脚本没有重载 SSH。"
 }
 assert_sshd_single_value port "$SSH_PORT"
-assert_sshd_single_value permitrootlogin no
-assert_sshd_single_value allowusers "$ADMIN_USER"
+assert_sshd_single_value permitrootlogin yes
+assert_sshd_single_value allowusers root
 assert_sshd_single_value pubkeyauthentication yes
 assert_sshd_single_value authenticationmethods publickey
 assert_sshd_single_value passwordauthentication no
@@ -572,10 +488,10 @@ fail2ban-client status sshd
 cat <<EOF
 
 完成。请另开一个终端验证：
-  ssh -p $SSH_PORT $ADMIN_USER@<你的服务器IP>
+  ssh -p $SSH_PORT root@<你的服务器IP>
 EOF
 if [ "$SCHEDULE_ROLLBACK" -eq 1 ]; then
-  echo "确认新登录成功后，立刻执行：sudo $CONFIRM"
+  echo "确认新登录成功后，立刻执行：$CONFIRM"
   echo "若 $ROLLBACK_SECONDS 秒内没有确认，SSH drop-in 会自动回滚。"
 fi
 [ -n "$TELEGRAM_TOKEN" ] && echo "Telegram 已启用：通知将以“$TELEGRAM_VPS_NAME”显示，请确保该聊天仅对可信成员开放。"
