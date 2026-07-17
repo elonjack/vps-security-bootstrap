@@ -129,12 +129,8 @@ ask_yes_no() {
 
 menu_option() {
   local number=$1 title=$2 description=${3:-}
-  if [ -n "$description" ]; then
-    printf '  %b%s.%b %s %b(%s)%b\n' \
-      "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title" "$STYLE_DIM" "$description" "$STYLE_RESET"
-  else
-    printf '  %b%s.%b %s\n' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
-  fi
+  printf '  %b[%s]%b  %s\n' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
+  [ -z "$description" ] || printf '       %b%s%b\n' "$STYLE_DIM" "$description" "$STYLE_RESET"
 }
 
 detect_current_ssh_port() {
@@ -159,19 +155,20 @@ interactive_wizard() {
   [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh'
   [ -t 0 ] || die '交互式向导需要终端；自动化运行请传入 --public-key-file 等参数。'
   clear 2>/dev/null || true
-  cat <<'EOF'
-========================================
- Debian VPS 安全管理向导（Debian 12 / 13）
-========================================
-EOF
+  printf '\n%bVPS 安全管理%b\n' "$STYLE_TITLE" "$STYLE_RESET"
+  printf '%bDebian 12 / 13 · root 专用%b\n' "$STYLE_DIM" "$STYLE_RESET"
+  printf '%b────────────────────────────────────%b\n' "$STYLE_DIM" "$STYLE_RESET"
   if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
     echo
     printf '%b请选择操作：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
-    menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥、更新 SSH 和 Fail2ban 配置'
-    menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban 封禁策略'
+    echo
+    menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥 · 更新 SSH 与 Fail2ban'
+    echo
+    menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
+    echo
     menu_option 0 '退出，不做任何修改'
     while true; do
-      read -r -p '请输入 1、2 或 0：' answer
+      read -r -p '请选择 [1 / 2 / 0] › ' answer
       case "$answer" in
         1) break ;;
         2) ROTATE_TELEGRAM=1; break ;;
