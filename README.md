@@ -16,9 +16,19 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 这会下载并运行最新的正式 Release，而不是可变的 `main` 分支。脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。运行前请确认你信任本仓库；该命令会以 root 权限执行远程脚本。
 
-## 固定版本与校验（可选）
+## 固定版本运行（可选）
 
-如果你希望记录或复现确切执行的版本，请从 [Releases](https://github.com/elonjack/vps-security-bootstrap/releases) 选择版本号并校验下载文件：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.1`：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.1/bootstrap.sh)
+```
+
+以后若发布 `v1.0.2`，想固定使用新版时，只需把命令中的 `v1.0.1` 改为 `v1.0.2`。
+
+## SHA-256 校验（高级，可选）
+
+如果你需要记录或审计下载文件，可在固定版本命令前执行以下校验：
 
 ```bash
 VERSION='v1.0.1'
