@@ -20,10 +20,10 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 ## 固定版本运行（可选）
 
-如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.1.1`：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.1.2`：
 
 ```bash
-bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.1.1/bootstrap.sh)
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.1.2/bootstrap.sh)
 ```
 
 以后发布新版本后，如需固定使用新版，只需把命令中的版本号改为对应的新版本号。
