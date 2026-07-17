@@ -235,7 +235,7 @@ require_root_private_file() {
 
 validate_telegram_settings() {
   [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
-  [[ "$TELEGRAM_TOKEN" == *:* && "$TELEGRAM_TOKEN" != *$'\n'* && "$TELEGRAM_TOKEN" != *$'\r'* && "$TELEGRAM_TOKEN" != *[[:space:]]* ]] || \
+  [[ "$TELEGRAM_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]] || \
     die 'Telegram Token 格式无效；请粘贴 BotFather 返回的完整 Token。'
   [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || die 'Telegram Chat ID 必须是数字；群组 Chat ID 可以是负数。'
   [ -z "$TELEGRAM_VPS_NAME" ] || [[ "$TELEGRAM_VPS_NAME" != *$'\n'* && "$TELEGRAM_VPS_NAME" != *$'\r'* && ${#TELEGRAM_VPS_NAME} -le 80 ]] || die 'Telegram VPS 名称不能包含换行，且最多 80 个字符。'
@@ -261,7 +261,9 @@ send_telegram_rotation_test() {
   curl --silent --show-error --fail --connect-timeout 3 --max-time 8 \
     --data-urlencode "chat_id=$TELEGRAM_CHAT_ID" \
     --data-urlencode "text=$text" \
-    "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage" >/dev/null
+    --config - >/dev/null <<EOF
+url = "https://api.telegram.org/bot$TELEGRAM_TOKEN/sendMessage"
+EOF
 }
 
 rotate_telegram_token() {
@@ -497,7 +499,9 @@ send() {
   local text=$1
   local -a args=(--data-urlencode "chat_id=$TELEGRAM_CHAT_ID" --data-urlencode "text=$text" --data-urlencode 'parse_mode=HTML' --data-urlencode 'disable_web_page_preview=true')
   curl --silent --show-error --fail --connect-timeout 3 --max-time 8 "${args[@]}" \
-    "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" >/dev/null || true
+    --config - >/dev/null <<CURL_CONFIG_EOF || true
+url = "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage"
+CURL_CONFIG_EOF
 }
 event=$1
 host=$(hostname -f 2>/dev/null || hostname)
