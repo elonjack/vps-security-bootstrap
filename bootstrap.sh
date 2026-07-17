@@ -139,7 +139,7 @@ prompt_line() {
 }
 
 prompt_block() {
-  printf '\n%b' "$STYLE_PROMPT"
+  printf '%b' "$STYLE_PROMPT"
   cat
   printf '%b' "$STYLE_RESET"
 }
@@ -176,15 +176,6 @@ detect_current_ssh_port() {
 }
 
 prompt_for_public_key() {
-  prompt_block <<'EOF'
-注意：
-  1. 请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，再粘贴到下方。
-  2. 公钥通常位于：
-     Linux/macOS：~/.ssh/id_ed25519.pub
-     Windows PowerShell：Get-Content $HOME\.ssh\id_ed25519.pub
-  3. 只能粘贴 .pub 公钥，绝不能粘贴 id_ed25519 等没有 .pub 后缀的私钥文件。
-  示例：ssh-ed25519 AAAA... your-computer
-EOF
   read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY
 }
 
@@ -200,7 +191,7 @@ interactive_wizard() {
     menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
     menu_option 0 '退出，不做任何修改'
     while true; do
-      read -r -p "${STYLE_MENU}请选择 [1/2/0] › ${STYLE_RESET}" answer
+      read -r -p "${STYLE_MENU}请选择 [1/2/0]: ${STYLE_RESET}" answer
       case "$answer" in
         1) break ;;
         2) ROTATE_TELEGRAM=1; break ;;
@@ -216,6 +207,12 @@ interactive_wizard() {
   2. SSH 密码登录会关闭，同时启用 Fail2ban 和可选的 Telegram 通知。
   3. 向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
   4. 请保持当前 SSH 窗口打开，直到新的 SSH 连接验证成功。
+  5. 请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，再粘贴到下方。
+  6. 公钥文件通常位于：
+     Linux/macOS：~/.ssh/id_ed25519.pub
+     Windows PowerShell：Get-Content $HOME\.ssh\id_ed25519.pub
+  7. 只能粘贴 .pub 公钥，绝不能粘贴 id_ed25519 等没有 .pub 后缀的私钥文件。
+     示例：ssh-ed25519 AAAA... your-computer
 EOF
   prompt_for_public_key
   current_port=$(detect_current_ssh_port)
