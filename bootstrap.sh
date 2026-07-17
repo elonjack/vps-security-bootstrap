@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 0.3 seconds
+Wall time: 0.4 seconds
 Output:
 #!/usr/bin/env bash
 # Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
@@ -7,7 +7,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.1.2'
+readonly SCRIPT_VERSION='v1.1.3'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -181,7 +181,9 @@ print_banner() {
 
 detect_current_ssh_port() {
   if command -v sshd >/dev/null 2>&1 && sshd -T >/dev/null 2>&1; then
-    sshd -T | awk '$1 == "port" { print $2; exit }'
+    # 不让 awk 提前退出；配合 pipefail 时，提前退出可能让 sshd 收到 SIGPIPE，
+    # 从而被 set -e 误判为检测端口失败。
+    sshd -T | awk '$1 == "port" && !found { print $2; found = 1 } END { exit !found }'
   else
     printf '22'
   fi
