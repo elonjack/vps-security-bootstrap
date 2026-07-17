@@ -448,9 +448,10 @@ systemctl daemon-reload
 
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
-apt-get update
-[ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get upgrade -y
-apt-get install -y openssh-server fail2ban nftables curl libpam-modules unattended-upgrades
+echo '提示：如系统自动更新正在运行，脚本会等待它完成（最长 10 分钟），请不要删除任何 lock 文件。'
+apt-get -o DPkg::Lock::Timeout=600 update
+[ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get -o DPkg::Lock::Timeout=600 upgrade -y
+apt-get -o DPkg::Lock::Timeout=600 install -y openssh-server fail2ban nftables curl libpam-modules unattended-upgrades
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
 printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - >/dev/null 2>&1 || die '提供的不是有效 SSH 公钥。'
