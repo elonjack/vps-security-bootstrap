@@ -18,13 +18,13 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 ## 固定版本运行（可选）
 
-如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.1`：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.2`：
 
 ```bash
-bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.1/bootstrap.sh)
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.2/bootstrap.sh)
 ```
 
-以后若发布 `v1.0.2`，想固定使用新版时，只需把命令中的 `v1.0.1` 改为 `v1.0.2`。
+以后若发布 `v1.0.2`，想固定使用新版时，只需把命令中的 `v1.0.2` 改为 `v1.0.2`。
 
 
 ## 如何准备并粘贴公钥
@@ -98,6 +98,18 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 同一个 Bot Token 可以用于多台 VPS 的**通知**，为每台机器使用不同名称即可。接收通知的聊天应仅包含可信成员，因为消息含有来源 IP。
 
 如果收到不认识的 root 登录成功通知，应视为私钥或服务器可能失陷：先通过云控制台或另一条可信连接保留访问，撤销可疑公钥、检查 SSH 日志、轮换密钥；无法确认影响范围时建议从可信镜像重建。
+
+## 更换 Telegram Bot Token
+
+已经启用 Telegram 通知的 VPS，如需作废旧 Token 或更换机器人 Token，重新下载并运行本脚本后，在第一个菜单选择 `2) 更换 Telegram Bot Token`。该操作会隐藏输入的新 Token，默认保留原 Chat ID 和 VPS 名称；确认输入 `YES` 后，仅原子更新 `/etc/vps-security/telegram.env` 并发送测试通知，**不会修改 SSH、公钥、端口、Fail2ban 或系统软件包**。
+
+如果你已把脚本保存到 VPS，也可直接执行：
+
+```bash
+bash bootstrap.sh --rotate-telegram-token
+```
+
+新 Token 已保存但测试通知失败时，脚本会给出警告；请核对 Token、Chat ID、网络，以及是否已在对应机器人聊天中点击 **Start**。
 
 ## 封禁策略
 
