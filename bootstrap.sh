@@ -36,13 +36,15 @@ ORIGINAL_ARGC=$#
 
 if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
   STYLE_RESET=$'\033[0m'
-  STYLE_TITLE=$'\033[1;33m'
+  STYLE_TITLE=$'\033[1;36m'
   STYLE_NUMBER=$'\033[1;33m'
+  STYLE_MENU=$'\033[1;33m'
   STYLE_DIM=$'\033[2m'
 else
   STYLE_RESET=''
   STYLE_TITLE=''
   STYLE_NUMBER=''
+  STYLE_MENU=''
   STYLE_DIM=''
 fi
 
@@ -132,9 +134,9 @@ ask_yes_no() {
 
 menu_option() {
   local number=$1 title=$2 description=${3:-}
-  printf '  %b%s.%b %s' "$STYLE_NUMBER" "$number" "$STYLE_RESET" "$title"
-  [ -z "$description" ] || printf ' %b· %s%b' "$STYLE_DIM" "$description" "$STYLE_RESET"
-  printf '\n'
+  printf '  %b%s. %s' "$STYLE_MENU" "$number" "$title"
+  [ -z "$description" ] || printf ' · %s' "$description"
+  printf '%b\n' "$STYLE_RESET"
 }
 
 print_banner() {
@@ -177,12 +179,12 @@ interactive_wizard() {
   clear 2>/dev/null || true
   print_banner
   if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
-    printf '%b请选择操作：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
+    printf '%b请选择操作：%b\n' "$STYLE_MENU" "$STYLE_RESET"
     menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH 和 Fail2ban'
     menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
     menu_option 0 '退出，不做任何修改'
     while true; do
-      read -r -p '请选择 [1/2/0] › ' answer
+      read -r -p "${STYLE_MENU}请选择 [1/2/0] › ${STYLE_RESET}" answer
       case "$answer" in
         1) break ;;
         2) ROTATE_TELEGRAM=1; break ;;
