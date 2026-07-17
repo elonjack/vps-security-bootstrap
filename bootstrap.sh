@@ -14,7 +14,6 @@ readonly F2B_LOG_LOCAL='/etc/fail2ban/fail2ban.d/00-vps-security-bootstrap.local
 readonly NOTIFIER='/usr/local/sbin/vps-security-notify'
 readonly LEGACY_TELEGRAM_CONTROL='/usr/local/sbin/vps-security-telegram-control'
 readonly LEGACY_TELEGRAM_CONTROL_SERVICE='/etc/systemd/system/vps-security-telegram-control.service'
-readonly CONFIRM='/usr/local/sbin/vps-security-confirm'
 readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/52-vps-security-bootstrap-auto-upgrades'
 SSH_PORT=52022
 PUBLIC_KEY=''
@@ -26,8 +25,6 @@ TELEGRAM_TOKEN_FILE=''
 TELEGRAM_CHAT_ID_FILE=''
 TELEGRAM_VPS_NAME=''
 BANTIME=1d
-ROLLBACK_SECONDS=600
-SCHEDULE_ROLLBACK=1
 SYSTEM_UPGRADE=1
 INTERACTIVE=0
 INTERACTIVE_FLAG=0
@@ -56,9 +53,8 @@ EOF
   --telegram-token-file PATH   从 root 可读文件读取 token（推荐，避免出现在历史记录）
   --telegram-chat-id-file PATH 从 root 可读文件读取 chat id（推荐）
   --telegram-vps-name NAME     Telegram 中显示的 VPS 名称（默认：主机名）
-  --permanent-bans             永久封禁（不推荐，默认逐级延长至 4 周）
+  --permanent-bans             SSH jail 永久封禁（默认逐级延长至 4 周）
   --skip-system-upgrade        跳过本次 apt upgrade（不推荐；仍安装所需软件包）
-  --no-rollback                不创建 10 分钟自动回滚保护（不推荐）
   -h, --help                   显示本帮助
 EOF
 }
@@ -81,7 +77,6 @@ while [ "$#" -gt 0 ]; do
     --telegram-vps-name) need_value "$@"; TELEGRAM_VPS_NAME=$2; shift 2 ;;
     --permanent-bans) BANTIME=-1; shift ;;
     --skip-system-upgrade) SYSTEM_UPGRADE=0; shift ;;
-    --no-rollback) SCHEDULE_ROLLBACK=0; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（使用 --help 查看用法）" ;;
   esac
@@ -124,7 +119,9 @@ detect_current_ssh_port() {
 
 prompt_for_public_key() {
   echo
-  echo '请从你的电脑复制 .pub 文件的完整一行内容，然后粘贴到下方并按回车。'
+  echo '请从你自己的电脑复制 SSH 公钥 .pub 文件的完整一行内容，然后粘贴到下方并按回车。'
+  echo '通常是 ~/.ssh/id_ed25519.pub；Windows PowerShell 可执行：Get-Content $HOME\.ssh\id_ed25519.pub'
+  echo '只能粘贴 .pub 公钥，绝不能粘贴 id_ed25519 等没有 .pub 后缀的私钥文件。'
   echo '示例：ssh-ed25519 AAAA... your-computer'
   read -r -p 'root SSH 公钥：' PUBLIC_KEY
 }
@@ -138,21 +135,35 @@ interactive_wizard() {
 ========================================
  Debian VPS 安全初始化向导（Debian 12 / 13）
 ========================================
-将保留 root 作为唯一 SSH 用户，只允许你提供的 SSH 公钥登录，
-关闭 SSH 密码登录，
-启用 Fail2ban 和自动安全更新。当前 SSH 连接请保持打开，直到最后验证成功。
+将保留 root 作为唯一 SSH 用户，只允许你本次提供的 SSH 公钥登录，
+关闭 SSH 密码登录，启用 Fail2ban 和可选 Telegram 通知。
+本向导会先收集你的选择；只有最后输入 YES 后才会开始修改系统。
+当前 SSH 连接请保持打开，直到新连接验证成功。
 EOF
   prompt_for_public_key
   current_port=$(detect_current_ssh_port)
-  prompt_default SSH_PORT '新的 SSH 端口（默认保持当前端口，避免云防火墙拦截）' "$current_port"
+  prompt_default SSH_PORT '新的 SSH 端口（直接回车保留当前端口；改端口前须放行云安全组）' "$current_port"
   if [ "$SSH_PORT" != "$current_port" ]; then
     echo "注意：你选择将 SSH 端口从 $current_port 改为 $SSH_PORT。"
     echo '请先在云厂商安全组/防火墙中放行新端口，否则新连接会失败。'
     ask_yes_no '已确认新端口已放行吗？' n || die '已取消；请先放行新端口后再运行。'
   fi
-  prompt_default IGNORE_IP 'Fail2ban 永不封禁的固定管理 IP/CIDR（没有就直接回车）' ''
-  if ask_yes_no '现在执行系统软件升级？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
+  prompt_default IGNORE_IP 'Fail2ban 白名单 IP/CIDR（直接回车：不添加公网白名单）' ''
+  echo '提示：白名单只是不被 Fail2ban 封禁；正确的 SSH 私钥登录无需加入白名单也可正常使用。'
+  echo '系统更新会在最后输入 YES 后才执行；现在仅记录你的选择，尚未修改系统。'
+  if ask_yes_no '执行 apt update 和 apt upgrade，安装可用的软件更新？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
   if ask_yes_no '启用 Telegram 登录/封禁通知？' n; then
+    cat <<'EOF'
+
+Telegram 配置步骤：
+  1. 在 Telegram 搜索 @BotFather，发送 /newbot 并按提示创建机器人。
+  2. 复制 BotFather 返回的 HTTP API Token；该 Token 相当于机器人密码，不要发送给他人。
+  3. 打开你创建的机器人，点击 Start 并发送任意一条消息。
+  4. 在可信设备的浏览器访问：
+       https://api.telegram.org/bot<你的Token>/getUpdates
+     在返回内容中找到 message.chat.id，并复制对应的数字作为 Chat ID。
+  5. 下方 Token 输入不会回显；Chat ID 可以正常粘贴。
+EOF
     read -rsp 'Telegram Bot Token（输入不回显）：' TELEGRAM_TOKEN
     printf '\n'
     read -r -p 'Telegram Chat ID：' TELEGRAM_CHAT_ID
@@ -161,12 +172,13 @@ EOF
   fi
   echo
   echo '即将应用以下设置：'
-  echo '  SSH 用户：root（仅 SSH 公钥登录）'
+  echo '  SSH 用户：root（仅本次提供的 SSH 公钥登录；旧公钥将失效）'
   echo "  SSH 端口：$SSH_PORT"
+  echo "  Fail2ban 白名单：${IGNORE_IP:-未设置（不额外白名单公网 IP）}"
+  echo '  Fail2ban 策略：10 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口'
   echo "  系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)"
   echo "  Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)"
   [ -z "$TELEGRAM_TOKEN" ] || echo "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
-  echo '  SSH 回滚保护：10 分钟内未确认将自动还原本脚本写入的 SSH 配置'
   read -r -p '确认开始请输入 YES：' answer
   [ "$answer" = YES ] || die '已取消，未修改系统。'
 }
@@ -191,6 +203,27 @@ require_root_private_file() {
   [ "$owner" -eq 0 ] || die "$label 文件必须由 root 所有：$path"
   (( (8#$mode & 077) == 0 )) || die "$label 文件权限必须是 0600 或更严格：$path"
 }
+
+validate_ignore_ip() {
+  local entry
+  local -a entries
+
+  [ -z "$IGNORE_IP" ] && return 0
+  [[ "$IGNORE_IP" != *$'\n'* && "$IGNORE_IP" != *$'\r'* && "$IGNORE_IP" != *[[:space:]]* ]] || \
+    die '--ignoreip 只能使用英文逗号分隔的 IP 或 CIDR，不能包含空格或换行。'
+  command -v python3 >/dev/null 2>&1 || die '校验 --ignoreip 需要 python3。'
+
+  local IFS=','
+  read -r -a entries <<< "$IGNORE_IP"
+  [ "${#entries[@]}" -gt 0 ] || die '--ignoreip 不能为空。'
+  for entry in "${entries[@]}"; do
+    [ -n "$entry" ] || die '--ignoreip 不能包含空项。'
+    python3 -c 'import ipaddress, sys; ipaddress.ip_network(sys.argv[1], strict=False)' "$entry" \
+      >/dev/null 2>&1 || die "--ignoreip 包含无效 IP 或 CIDR：$entry"
+  done
+}
+
+validate_ignore_ip
 [ -z "$TELEGRAM_TOKEN_FILE" ] || { require_root_private_file "$TELEGRAM_TOKEN_FILE" 'Telegram token'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
 [ -z "$TELEGRAM_CHAT_ID_FILE" ] || { require_root_private_file "$TELEGRAM_CHAT_ID_FILE" 'Telegram chat id'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
 [ -n "$TELEGRAM_TOKEN" ] && [ -z "$TELEGRAM_CHAT_ID" ] && die 'Telegram token 和 chat id 必须同时提供。'
@@ -206,7 +239,6 @@ fi
 
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
-ROLLBACK_SCRIPT="$CONF_DIR/rollback-ssh-$STAMP.sh"
 mkdir -p "$BACKUP_DIR"
 chmod 700 "$CONF_DIR" "$BACKUP_DIR"
 backup_if_exists() { [ -e "$1" ] && cp -a "$1" "$BACKUP_DIR/$2" || true; }
@@ -245,10 +277,9 @@ APT::Periodic::Update-Package-Lists "1";
 APT::Periodic::Unattended-Upgrade "1";
 EOF
 
-info '写入 root 的 SSH 公钥'
+info '覆盖 root 的 SSH 公钥（仅保留本次提供的公钥）'
 install -d -o root -g root -m 0700 /root/.ssh
-touch /root/.ssh/authorized_keys
-grep -Fqx "$PUBLIC_KEY" /root/.ssh/authorized_keys || printf '%s\n' "$PUBLIC_KEY" >> /root/.ssh/authorized_keys
+printf '%s\n' "$PUBLIC_KEY" > /root/.ssh/authorized_keys
 chown root:root /root/.ssh/authorized_keys
 chmod 0600 /root/.ssh/authorized_keys
 
@@ -312,37 +343,6 @@ assert_sshd_single_value allowtcpforwarding no
 assert_sshd_single_value allowagentforwarding no
 assert_sshd_single_value x11forwarding no
 assert_sshd_single_value permittunnel no
-
-if [ "$SCHEDULE_ROLLBACK" -eq 1 ]; then
-  info "创建 $ROLLBACK_SECONDS 秒自动回滚保护"
-  cat > "$ROLLBACK_SCRIPT" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-if [ -e '$BACKUP_DIR/ssh-dropin.before' ]; then
-  cp -a '$BACKUP_DIR/ssh-dropin.before' '$SSH_DROPIN'
-else
-  rm -f '$SSH_DROPIN'
-fi
-if [ -e '$BACKUP_DIR/ssh-dropin-legacy.before' ]; then
-  cp -a '$BACKUP_DIR/ssh-dropin-legacy.before' '$LEGACY_SSH_DROPIN'
-else
-  rm -f '$LEGACY_SSH_DROPIN'
-fi
-sshd -t && systemctl reload ssh
-EOF
-  chmod 0700 "$ROLLBACK_SCRIPT"
-  ROLLBACK_UNIT="vps-security-ssh-rollback-$STAMP"
-  systemd-run --quiet --unit="$ROLLBACK_UNIT" --on-active="$ROLLBACK_SECONDS"s "$ROLLBACK_SCRIPT"
-  cat > "$CONFIRM" <<EOF
-#!/usr/bin/env bash
-set -euo pipefail
-systemctl stop '$ROLLBACK_UNIT.timer' '$ROLLBACK_UNIT.service' 2>/dev/null || true
-systemctl reset-failed '$ROLLBACK_UNIT.timer' '$ROLLBACK_UNIT.service' 2>/dev/null || true
-rm -f '$ROLLBACK_SCRIPT' "\$0"
-echo 'SSH 配置已确认，自动回滚已取消。'
-EOF
-  chmod 0700 "$CONFIRM"
-fi
 
 info '应用 SSH 配置'
 systemctl reload ssh
@@ -490,9 +490,6 @@ cat <<EOF
 完成。请另开一个终端验证：
   ssh -p $SSH_PORT root@<你的服务器IP>
 EOF
-if [ "$SCHEDULE_ROLLBACK" -eq 1 ]; then
-  echo "确认新登录成功后，立刻执行：$CONFIRM"
-  echo "若 $ROLLBACK_SECONDS 秒内没有确认，SSH drop-in 会自动回滚。"
-fi
+echo '本工具不创建 SSH 自动回滚；新连接验证成功前，请保持当前 SSH 窗口打开。'
 [ -n "$TELEGRAM_TOKEN" ] && echo "Telegram 已启用：通知将以“$TELEGRAM_VPS_NAME”显示，请确保该聊天仅对可信成员开放。"
 echo '注意：请在云厂商安全组/防火墙中先放行新的 SSH 端口。'

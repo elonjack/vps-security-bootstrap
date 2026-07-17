@@ -6,16 +6,19 @@
 
 > 直接使用 root 的代价是：私钥一旦泄露，攻击者直接拥有最高权限。请为这台 VPS 使用专用、强口令保护的私钥，且不要共享。
 
-## 只需这样运行
+## 安全获取并运行
 
-保持当前 root SSH 窗口不要关闭，在 VPS 执行：
+不要下载可变的 `main` 分支后直接以 root 执行。请从 [Releases](https://github.com/elonjack/vps-security-bootstrap/releases) 下载指定版本的 `bootstrap.sh` 和对应的 `bootstrap.sh.sha256`，校验通过后再运行。
 
 ```bash
-curl -fsSLO https://raw.githubusercontent.com/elonjack/vps-security-bootstrap/main/bootstrap.sh
-bash bootstrap.sh
+VERSION='替换为发布版本，例如 v1.0.0'
+curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh"
+curl -fLO "https://github.com/elonjack/vps-security-bootstrap/releases/download/$VERSION/bootstrap.sh.sha256"
+sha256sum -c bootstrap.sh.sha256
+sudo bash bootstrap.sh
 ```
 
-脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。
+校验输出必须为 `bootstrap.sh: OK`。脚本会等待你粘贴 SSH 公钥，不需要预先上传 `.pub` 文件，也不会要求创建管理员账号或 sudo 密码。
 
 ## 如何准备并粘贴公钥
 
@@ -44,27 +47,21 @@ Get-Content $HOME\.ssh\id_ed25519.pub
 
 1. 粘贴 root 的 SSH 公钥。
 2. 选择 SSH 端口；默认保持当前端口，避免云安全组未放行新端口时失联。
-3. 可选填写 Fail2ban 白名单、立即系统更新和 Telegram 通知。
+3. 可选填写 Fail2ban 白名单、是否执行系统更新和 Telegram 通知；此时仅记录选择，尚未修改系统。
 4. 查看摘要并输入 `YES`。
-5. 脚本安装组件、将公钥加入 `/root/.ssh/authorized_keys`、只允许 root 公钥登录、启动 Fail2ban。
+5. 脚本安装组件、用本次公钥覆盖 `/root/.ssh/authorized_keys`、只允许 root 公钥登录、启动 Fail2ban。
 
-现有 root 公钥不会被清空，脚本只会补充你本次粘贴的公钥；原文件会备份到 `/etc/vps-security/backups/`。
+`/root/.ssh/authorized_keys` 只保留本次粘贴的这一把公钥；此前可登录 root 的其他公钥会失效。原文件会备份到 `/etc/vps-security/backups/`。
 
 ## 完成后必须验证
 
-脚本会创建 10 分钟的 SSH 自动回滚保护。请新开本地终端（不要关闭当前 root 窗口）测试：
+请新开本地终端测试，但在验证成功前不要关闭当前 root SSH 窗口：
 
 ```bash
 ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 ```
 
-把端口改成向导里的值。登录成功后，在新连接中执行：
-
-```bash
-/usr/local/sbin/vps-security-confirm
-```
-
-这会取消自动回滚。若公钥或端口设置有误，10 分钟内没有确认时，脚本写入的 SSH 配置会自动还原。
+把端口改成向导里的值。新连接成功后，新 SSH 配置即已生效，可以关闭旧窗口。本工具不创建自动回滚任务；若新连接失败，请用仍保持打开的旧 SSH 会话排查配置，或使用云厂商控制台/重装系统恢复访问。
 
 ## 最终 SSH 策略
 
@@ -73,9 +70,23 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 - 禁用 SSH 转发、X11、隧道等高风险功能。
 - `PermitRootLogin yes` 只用于允许 root 公钥认证；由于同时强制 `AuthenticationMethods publickey` 和关闭密码认证，它不允许 root 使用 SSH 密码进入。
 
+## Fail2ban 白名单与防火墙
+
+向导中的 Fail2ban 白名单可直接回车留空；这表示不为任何公网地址添加白名单。白名单不是 SSH 登录白名单：即使不填写，持有正确私钥仍可正常登录。只有固定管理出口确实可能因多次失败登录而被误封时，才填写 IP 或 CIDR，例如 `203.0.113.10`、`203.0.113.0/24` 或 `2001:db8::/64`。多个条目使用英文逗号分隔，脚本会拒绝非法格式、空格和换行。
+
+脚本安装并使用 `nftables`，但用途是让 Fail2ban 封禁爆破来源；它不会设置“默认拒绝入站”的全局主机防火墙策略。请在云厂商安全组/防火墙中仅放行实际需要的端口，例如 SSH 端口，以及部署 Web 服务时的 80/443。
+
 ## Telegram 通知与 VPS 名称
 
-启用 Telegram 后，向导会要求填写 VPS 名称，例如 `HK-01`。通知会显示名称、主机、root 登录来源 IP、时间，以及 Fail2ban 封禁信息。
+启用 Telegram 前，先完成以下步骤：
+
+1. 在 Telegram 搜索 `@BotFather`，发送 `/newbot` 并按提示创建机器人。
+2. 保存 BotFather 返回的 HTTP API Token；它相当于机器人密码，不能分享。
+3. 打开新建的机器人，点击 **Start** 并发送任意一条消息。
+4. 在可信设备浏览器访问 `https://api.telegram.org/bot<你的Token>/getUpdates`，从返回内容的 `message.chat.id` 复制数字 Chat ID。
+5. 在脚本中粘贴 Token、Chat ID，并填写 VPS 名称，例如 `HK-01`。Token 输入时不会回显。
+
+通知会显示名称、主机、root 登录来源 IP、时间，以及 Fail2ban 封禁信息。
 
 同一个 Bot Token 可以用于多台 VPS 的**通知**，为每台机器使用不同名称即可。接收通知的聊天应仅包含可信成员，因为消息含有来源 IP。
 
@@ -83,7 +94,7 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 
 ## 封禁策略
 
-- SSH 10 分钟内失败 3 次：开始递增封禁，初始 1 天，最高 4 周。
+- SSH 在 10 分钟内失败 3 次：立即封禁来源 IP；首次封禁 1 天，之后逐级延长，最高 4 周。这是偏严格的策略，适合仅用 SSH 私钥、且能通过云控制台恢复的 VPS。
 - 同一 IP 在 30 天内累计触发 5 次完整封禁：`recidive` jail 永久封禁该 IP 的所有端口。
 
 ## 自动化部署（可选）
