@@ -18,13 +18,13 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 ## 固定版本运行（可选）
 
-如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.2`：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.3`：
 
 ```bash
-bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.2/bootstrap.sh)
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.3/bootstrap.sh)
 ```
 
-以后若发布 `v1.0.2`，想固定使用新版时，只需把命令中的 `v1.0.2` 改为 `v1.0.2`。
+以后若发布 `v1.0.3`，想固定使用新版时，只需把命令中的 `v1.0.3` 改为 `v1.0.3`。
 
 
 ## 如何准备并粘贴公钥
@@ -56,9 +56,9 @@ Get-Content $HOME\.ssh\id_ed25519.pub
 2. 选择 SSH 端口；默认保持当前端口，避免云安全组未放行新端口时失联。
 3. 可选填写 Fail2ban 白名单、是否执行系统更新和 Telegram 通知；此时仅记录选择，尚未修改系统。
 4. 查看摘要并输入 `YES`。
-5. 脚本安装组件、用本次公钥覆盖 `/root/.ssh/authorized_keys`、只允许 root 公钥登录、启动 Fail2ban。
+5. 脚本安装组件、用本次公钥覆盖 `/root/.ssh/authorized_keys`、禁用其他 root 公钥来源、只允许 root 公钥登录、启动 Fail2ban。
 
-`/root/.ssh/authorized_keys` 只保留本次粘贴的这一把公钥；此前可登录 root 的其他公钥会失效。原文件会备份到 `/etc/vps-security/backups/`。
+`/root/.ssh/authorized_keys` 只保留本次粘贴的这一把公钥。脚本只允许 SSH 从这个文件读取 root 公钥，并禁用额外的授权密钥命令和用户 CA；遗留的 `/root/.ssh/authorized_keys2` 会在备份后移除。原文件会备份到 `/etc/vps-security/backups/`。
 
 ## 完成后必须验证
 
@@ -74,6 +74,7 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 
 - 仅允许 `root` 用户通过 SSH 登录。
 - 仅允许公钥认证；SSH 密码和键盘交互登录均被禁用。
+- root 公钥只从 `/root/.ssh/authorized_keys` 读取；`authorized_keys2`、`AuthorizedKeysCommand` 和用户 CA 均被禁用。
 - 禁用 SSH 转发、X11、隧道等高风险功能。
 - `PermitRootLogin yes` 只用于允许 root 公钥认证；由于同时强制 `AuthenticationMethods publickey` 和关闭密码认证，它不允许 root 使用 SSH 密码进入。
 
