@@ -176,7 +176,16 @@ detect_current_ssh_port() {
 }
 
 prompt_for_public_key() {
-  read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY
+  while true; do
+    if ! read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY; then
+      die '无法读取 SSH 公钥输入；请确认是在交互式终端中运行脚本。'
+    fi
+    if [ -n "$PUBLIC_KEY" ]; then
+      prompt_line '已接收 SSH 公钥，继续设置 SSH 端口。'
+      return 0
+    fi
+    prompt_line '错误：SSH 公钥不能为空；请粘贴 .pub 文件中的完整一行内容后按回车。'
+  done
 }
 
 interactive_wizard() {
