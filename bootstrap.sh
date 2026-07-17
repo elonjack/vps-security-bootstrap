@@ -7,7 +7,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly VERSION='v1.1.0'
+readonly VERSION='v1.1.1'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -118,7 +118,7 @@ prompt_default() {
 }
 
 ask_yes_no() {
-  local prompt=$1 default=${2:-y} answer
+  local prompt=$1 default=${2:-n} answer
   while true; do
     if [ "$default" = y ]; then
       read -r -p "${STYLE_PROMPT}${prompt} [Y/n]: ${STYLE_RESET}" answer
@@ -250,7 +250,7 @@ EOF
   fi
   prompt_default IGNORE_IP 'Fail2ban 白名单 IP/CIDR（直接回车：不添加公网白名单）' ''
   prompt_line '提示：正确的 SSH 私钥登录无需加入白名单；所有选择会在最后确认后才开始执行。'
-  if ask_yes_no '执行 apt update 和 apt upgrade，安装可用的软件更新？' y; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
+  if ask_yes_no '执行 apt update 和 apt upgrade，安装可用的软件更新？' n; then SYSTEM_UPGRADE=1; else SYSTEM_UPGRADE=0; fi
   if ask_yes_no '启用 Telegram 登录/封禁通知？' n; then
     prompt_block <<'EOF'
 Telegram 配置：
@@ -354,7 +354,7 @@ rotate_telegram_token() {
 EOF
   read -rsp "${STYLE_PROMPT}新的 Telegram Bot Token（粘贴后直接按回车；输入不显示是正常的）：${STYLE_RESET}" TELEGRAM_TOKEN
   printf '\n'
-  if ask_yes_no "保留原 Chat ID（$old_chat_id）？" y; then
+  if ask_yes_no "保留原 Chat ID（$old_chat_id）？" n; then
     TELEGRAM_CHAT_ID=$old_chat_id
   else
     read -r -p "${STYLE_PROMPT}新的 Telegram Chat ID：${STYLE_RESET}" TELEGRAM_CHAT_ID
