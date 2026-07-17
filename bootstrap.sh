@@ -1,5 +1,5 @@
 Exit code: 0
-Wall time: 0.4 seconds
+Wall time: 0.5 seconds
 Output:
 #!/usr/bin/env bash
 # Debian 12/13 SSH hardening + Fail2ban + optional Telegram notifications.
@@ -7,6 +7,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
+readonly VERSION='v1.0.22'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -175,7 +176,7 @@ print_banner() {
   for line in "${logo[@]}"; do
     printf '%b%s%b\n' "$STYLE_TITLE" "$line" "$STYLE_RESET"
   done
-  printf '%bPIKACHU SECURITY BOOTSTRAP · DEBIAN 12 / 13%b\n' "$STYLE_TITLE" "$STYLE_RESET"
+  printf '%bPIKACHU SECURITY BOOTSTRAP %s · DEBIAN 12 / 13%b\n' "$STYLE_TITLE" "$VERSION" "$STYLE_RESET"
 }
 
 detect_current_ssh_port() {

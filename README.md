@@ -1,6 +1,6 @@
 # Debian VPS 安全初始化（Debian 12 / 13，root 专用）
 
-这是 root 专用的交互式初始化脚本：只允许 `root` 使用 SSH 公钥登录，关闭 SSH 密码登录，启用 Fail2ban、自动安全更新和可选 Telegram 通知。脚本**不会创建新的 SSH 用户**。
+这是 root 专用的交互式初始化脚本：只允许 `root` 使用 SSH 公钥登录，关闭 SSH 密码登录，启用 Fail2ban 和可选 Telegram 通知；系统更新仅在你最后确认时按选择执行一次。脚本**不会创建新的 SSH 用户**。
 
 适用范围：**Debian 12、Debian 13、systemd**。请在新 VPS，或你明确知道现有 SSH 配置可被替换的 VPS 上使用。
 
@@ -20,13 +20,13 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 ## 固定版本运行（可选）
 
-如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.10`：
+如果你希望始终运行某个确切版本，而不是以后自动更新到最新 Release，例如固定使用当前的 `v1.0.22`：
 
 ```bash
-bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.10/bootstrap.sh)
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/download/v1.0.22/bootstrap.sh)
 ```
 
-以后若发布 `v1.0.10`，想固定使用新版时，只需把命令中的 `v1.0.10` 改为 `v1.0.10`。
+以后发布新版本后，如需固定使用新版，只需把命令中的版本号改为对应的新版本号。
 
 
 ## 如何准备并粘贴公钥
@@ -57,7 +57,7 @@ Get-Content $HOME\.ssh\id_ed25519.pub
 1. 粘贴 root 的 SSH 公钥。
 2. 选择 SSH 端口；默认保持当前端口，避免云安全组未放行新端口时失联。
 3. 可选填写 Fail2ban 白名单、是否执行系统更新和 Telegram 通知；此时仅记录选择，尚未修改系统。
-4. 查看摘要并输入 `YES`。
+4. 查看摘要并确认执行；此项默认“否”，请输入 `y` 后回车才会开始修改系统。
 5. 脚本安装组件、用本次公钥覆盖 `/root/.ssh/authorized_keys`、禁用其他 root 公钥来源、只允许 root 公钥登录、启动 Fail2ban。
 
 `/root/.ssh/authorized_keys` 只保留本次粘贴的这一把公钥。脚本只允许 SSH 从这个文件读取 root 公钥，并禁用额外的授权密钥命令和用户 CA；遗留的 `/root/.ssh/authorized_keys2` 会在备份后移除。原文件会备份到 `/etc/vps-security/backups/`。
@@ -104,7 +104,7 @@ ssh -i ~/.ssh/id_ed25519 -p 22 root@服务器IP
 
 ## 更换 Telegram Bot Token
 
-已经启用 Telegram 通知的 VPS，如需作废旧 Token 或更换机器人 Token，重新下载并运行本脚本后，在第一个菜单选择 `2) 更换 Telegram Bot Token`。该操作会隐藏输入的新 Token，默认保留原 Chat ID 和 VPS 名称；确认输入 `YES` 后，仅原子更新 `/etc/vps-security/telegram.env` 并发送测试通知，**不会修改 SSH、公钥、端口、Fail2ban 或系统软件包**。
+已经启用 Telegram 通知的 VPS，如需作废旧 Token 或更换机器人 Token，重新下载并运行本脚本后，在第一个菜单选择 `2. 更换 Telegram Bot Token`。该操作会隐藏输入的新 Token，默认保留原 Chat ID 和 VPS 名称；确认更新后，仅原子更新 `/etc/vps-security/telegram.env` 并发送测试通知，**不会修改 SSH、公钥、端口、Fail2ban 或系统软件包**。
 
 如果你已把脚本保存到 VPS，也可直接执行：
 
@@ -116,7 +116,7 @@ bash bootstrap.sh --rotate-telegram-token
 
 ## 封禁策略
 
-- SSH 在 10 分钟内失败 3 次：立即封禁来源 IP；首次封禁 1 天，之后逐级延长，最高 4 周。这是偏严格的策略，适合仅用 SSH 私钥、且能通过云控制台恢复的 VPS。
+- SSH 在 3 分钟内失败 3 次：立即封禁来源 IP；首次封禁 1 天，之后逐级延长，最高 4 周。这是偏严格的策略，适合仅用 SSH 私钥、且能通过云控制台恢复的 VPS。
 - 同一 IP 在 30 天内累计触发 5 次完整封禁：`recidive` jail 永久封禁该 IP 的所有端口。
 
 ## 自动化部署（可选）
