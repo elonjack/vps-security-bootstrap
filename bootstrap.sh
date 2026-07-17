@@ -138,6 +138,14 @@ prompt_line() {
   printf '%b%s%b\n' "$STYLE_PROMPT" "$*" "$STYLE_RESET"
 }
 
+discard_pasted_empty_lines() {
+  local buffered
+  while IFS= read -r -t 0.05 buffered; do
+    buffered=${buffered%$'\r'}
+    [ -n "$buffered" ] && break
+  done
+}
+
 prompt_block() {
   printf '%b' "$STYLE_PROMPT"
   cat
@@ -180,7 +188,9 @@ prompt_for_public_key() {
     if ! read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY; then
       die '无法读取 SSH 公钥输入；请确认是在交互式终端中运行脚本。'
     fi
+    PUBLIC_KEY=${PUBLIC_KEY%$'\r'}
     if [ -n "$PUBLIC_KEY" ]; then
+      discard_pasted_empty_lines
       prompt_line '已接收 SSH 公钥，继续设置 SSH 端口。'
       return 0
     fi
