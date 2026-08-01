@@ -1,0 +1,126 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  shell:
+    name: Bash syntax and ShellCheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes shellcheck
+
+      - name: Verify script
+        run: |
+          test "$(head -n 1 bootstrap.sh)" = '#!/usr/bin/env bash'
+          ! grep -n $'\r' bootstrap.sh
+          bash -n bootstrap.sh
+          shellcheck bootstrap.sh
+          version=$(sed -n "s/^readonly SCRIPT_VERSION='\\([^']*\\)'$/\\1/p" bootstrap.sh)
+          test -n "$version"
+          grep -F "version=$version" README.md
+          git diff --check
+
+  powershell:
+    name: Windows PowerShell 5.1 syntax and smoke tests
+    runs-on: windows-2022
+    timeout-minutes: 5
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Verify Windows scripts
+        shell: powershell
+        run: |
+          Install-Module `
+            -Name PSScriptAnalyzer `
+            -RequiredVersion 1.25.0 `
+            -Scope CurrentUser `
+            -Repository PSGallery `
+            -Force
+          Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+
+          $path = Join-Path $PWD 'windows-bootstrap.ps1'
+          $bytes = [IO.File]::ReadAllBytes($path)
+          if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xef -or $bytes[1] -ne 0xbb -or $bytes[2] -ne 0xbf) {
+            throw 'windows-bootstrap.ps1 must use UTF-8 with BOM for Windows PowerShell 5.1.'
+          }
+          if ([IO.File]::ReadAllText($path).Contains("`r")) {
+            throw 'windows-bootstrap.ps1 must use LF line endings.'
+          }
+
+          $tokens = $null
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | ForEach-Object Message | Out-String) }
+
+          Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
+          . $path
+          foreach ($source in @(
+            (Get-RdpGuardSource),
+            (Get-RestoreSource),
+            (Get-RdpPortCleanupSource),
+            (Get-TelegramNotifierSource),
+            (Get-TelegramLoginWatcherSource)
+          )) {
+            $embeddedTokens = $null
+            $embeddedErrors = $null
+            [Management.Automation.Language.Parser]::ParseInput(
+              $source,
+              [ref]$embeddedTokens,
+              [ref]$embeddedErrors
+            ) | Out-Null
+            if ($embeddedErrors.Count) { throw ($embeddedErrors | ForEach-Object Message | Out-String) }
+            $embeddedAnalysis = @(Invoke-ScriptAnalyzer -ScriptDefinition $source -Severity Warning, Error)
+            if ($embeddedAnalysis.Count) {
+              throw ($embeddedAnalysis | Format-Table -AutoSize | Out-String)
+            }
+          }
+
+          $analysis = @(Invoke-ScriptAnalyzer -Path $path -Severity Warning, Error)
+          if ($analysis.Count) { throw ($analysis | Format-Table -AutoSize | Out-String) }
+
+          if (-not (Test-IpOrCidr '203.0.113.10')) { throw 'IPv4 validation failed.' }
+          if (-not (Test-IpOrCidr '2001:db8::/64')) { throw 'IPv6 CIDR validation failed.' }
+          if (Test-IpOrCidr '203.0.113.10/99') { throw 'Invalid CIDR was accepted.' }
+          if (Test-IpOrCidr '1.2.3') { throw 'Non-canonical IPv4 was accepted.' }
+          if (-not (Test-AddressInNetwork '203.0.113.10' '203.0.113.0/24')) {
+            throw 'IPv4 CIDR membership test failed.'
+          }
+          Assert-TelegramSetting `
+            -Token '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd' `
+            -ChatId '-1001234567890' `
+            -VpsName 'CI-Windows'
+          $invalidTelegramCaught = $false
+          try {
+            Assert-TelegramSetting -Token 'bad' -ChatId 'x' -VpsName "bad`nname"
+          } catch {
+            $invalidTelegramCaught = $true
+          }
+          if (-not $invalidTelegramCaught) { throw 'Invalid Telegram settings were accepted.' }
+          if ((Get-RdpGuardSource) -notmatch 'protectedPorts') {
+            throw 'RDP Guard must protect both the current and target ports before reboot.'
+          }
+          if ((Get-RdpPortCleanupSource) -notmatch 'VpsSecurity-RdpAllow-Current-\*') {
+            throw 'The one-time old-port cleanup rule is missing.'
+          }
+
+          $versionMatch = Select-String -Path $path -Pattern "ScriptVersion = '(v[^']+)'"
+          if (-not $versionMatch) { throw 'Windows script version is missing.' }
+          $version = $versionMatch.Matches[0].Groups[1].Value
+          if (-not (Select-String -Path README.md -SimpleMatch "`$version = '$version'")) {
+            throw 'README Windows version does not match the script.'
+          }
