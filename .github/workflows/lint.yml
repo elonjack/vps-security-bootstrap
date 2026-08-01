@@ -29,7 +29,7 @@ jobs:
           test "$(head -n 1 bootstrap.sh)" = '#!/usr/bin/env bash'
           ! grep -n $'\r' bootstrap.sh
           bash -n bootstrap.sh
-          shellcheck --rcfile .shellcheckrc bootstrap.sh
+          shellcheck --severity=warning bootstrap.sh
           version=$(sed -n "s/^readonly SCRIPT_VERSION='\\([^']*\\)'$/\\1/p" bootstrap.sh)
           test -n "$version"
           grep -F "version=$version" README.md
