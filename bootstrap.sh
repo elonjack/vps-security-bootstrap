@@ -322,7 +322,8 @@ EOF
 
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
 [ -r /etc/debian_version ] || die '此脚本仅面向 Debian 12 或 13。'
-# shellcheck disable=SC1091 -- Debian guarantees this system metadata file.
+# Debian guarantees this system metadata file.
+# shellcheck disable=SC1091
 . /etc/os-release
 [ "$ID" = debian ] || die '此脚本仅支持 Debian。'
 case "${VERSION_ID%%.*}" in
@@ -387,7 +388,8 @@ rotate_telegram_token() {
   [ -f "$CONF_DIR/telegram.env" ] || die '未找到现有 Telegram 配置；请先选择“初次部署 / 重新加固 SSH”启用 Telegram 通知。'
   [ -x "$NOTIFIER" ] || die '未找到 Telegram 通知程序；请先选择“初次部署 / 重新加固 SSH”重新写入通知配置。'
   require_root_private_file "$CONF_DIR/telegram.env" 'Telegram 配置'
-  # shellcheck disable=SC1091 -- Path is generated and validated by this script.
+  # Path is generated and validated by this script.
+  # shellcheck disable=SC1091
   source "$CONF_DIR/telegram.env"
   old_chat_id=${TELEGRAM_CHAT_ID:-}
   old_vps_name=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
