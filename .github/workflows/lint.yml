@@ -15,7 +15,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Install ShellCheck
         run: |
@@ -27,7 +27,7 @@ jobs:
           test "$(head -n 1 bootstrap.sh)" = '#!/usr/bin/env bash'
           ! grep -n $'\r' bootstrap.sh
           bash -n bootstrap.sh
-          shellcheck bootstrap.sh
+          shellcheck --rcfile .shellcheckrc bootstrap.sh
           version=$(sed -n "s/^readonly SCRIPT_VERSION='\\([^']*\\)'$/\\1/p" bootstrap.sh)
           test -n "$version"
           grep -F "version=$version" README.md
@@ -40,7 +40,7 @@ jobs:
 
     steps:
       - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
 
       - name: Verify Windows scripts
         shell: powershell

@@ -92,7 +92,11 @@ EOF
 die() { printf '%b错误：%s%b\n' "$STYLE_ERROR" "$*" "$STYLE_RESET" >&2; exit 1; }
 info() { printf '\n%b==> %s%b\n' "$STYLE_INFO" "$*" "$STYLE_RESET"; }
 success() { printf '%b完成：%s%b\n' "$STYLE_SUCCESS" "$*" "$STYLE_RESET"; }
-need_value() { [ "$#" -ge 2 ] && [ -n "$2" ] || die "$1 需要一个值"; }
+need_value() {
+  if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+    die "$1 需要一个值"
+  fi
+}
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -298,7 +302,9 @@ EOF
     if ! read -r -p "${STYLE_PROMPT}Telegram Chat ID（必填，仅数字）：${STYLE_RESET}" TELEGRAM_CHAT_ID; then
       die '未读取到 Telegram Chat ID，操作已取消。'
     fi
-    [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
+    if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+      die 'Telegram Token 和 Chat ID 都不能为空。'
+    fi
     prompt_default TELEGRAM_VPS_NAME 'Telegram 中显示的 VPS 名称' "$(hostname -f 2>/dev/null || hostname)"
   fi
   prompt_block <<EOF
@@ -316,6 +322,7 @@ EOF
 
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
 [ -r /etc/debian_version ] || die '此脚本仅面向 Debian 12 或 13。'
+# shellcheck disable=SC1091 -- Debian guarantees this system metadata file.
 . /etc/os-release
 [ "$ID" = debian ] || die '此脚本仅支持 Debian。'
 case "${VERSION_ID%%.*}" in
@@ -324,11 +331,15 @@ case "${VERSION_ID%%.*}" in
 esac
 [ -d /run/systemd/system ] || die '此脚本需要 systemd。'
 [ "$INTERACTIVE" -eq 0 ] || interactive_wizard
-[[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] && [ "$SSH_PORT" -le 65535 ] || die '--ssh-port 必须是 1–65535。'
+if ! [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$SSH_PORT" -gt 65535 ]; then
+  die '--ssh-port 必须是 1–65535。'
+fi
 [ -z "$PUBLIC_KEY" ] || [ -z "$PUBLIC_KEY_FILE" ] || die '只能使用一种公钥传入方式。'
 require_root_private_file() {
   local path=$1 label=$2 owner mode
-  [ -f "$path" ] && [ -r "$path" ] || die "无法读取 $label 文件：$path"
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    die "无法读取 $label 文件：$path"
+  fi
   owner=$(stat -c '%u' "$path")
   mode=$(stat -c '%a' "$path")
   [ "$owner" -eq 0 ] || die "$label 文件必须由 root 所有：$path"
@@ -336,7 +347,9 @@ require_root_private_file() {
 }
 
 validate_telegram_settings() {
-  [ -n "$TELEGRAM_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ] || die 'Telegram Token 和 Chat ID 都不能为空。'
+  if [ -z "$TELEGRAM_TOKEN" ] || [ -z "$TELEGRAM_CHAT_ID" ]; then
+    die 'Telegram Token 和 Chat ID 都不能为空。'
+  fi
   [[ "$TELEGRAM_TOKEN" =~ ^[0-9]+:[A-Za-z0-9_-]{20,}$ ]] || \
     die 'Telegram Token 格式无效；请粘贴 BotFather 返回的完整 Token。'
   [[ "$TELEGRAM_CHAT_ID" =~ ^-?[0-9]+$ ]] || die 'Telegram Chat ID 必须是数字；群组 Chat ID 可以是负数。'
@@ -374,6 +387,7 @@ rotate_telegram_token() {
   [ -f "$CONF_DIR/telegram.env" ] || die '未找到现有 Telegram 配置；请先选择“初次部署 / 重新加固 SSH”启用 Telegram 通知。'
   [ -x "$NOTIFIER" ] || die '未找到 Telegram 通知程序；请先选择“初次部署 / 重新加固 SSH”重新写入通知配置。'
   require_root_private_file "$CONF_DIR/telegram.env" 'Telegram 配置'
+  # shellcheck disable=SC1091 -- Path is generated and validated by this script.
   source "$CONF_DIR/telegram.env"
   old_chat_id=${TELEGRAM_CHAT_ID:-}
   old_vps_name=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
@@ -451,8 +465,9 @@ validate_public_key() {
     die '提供的不是有效 SSH 公钥。'
   if [ "$key_type" = ssh-rsa ]; then
     bits=$(printf '%s\n' "$PUBLIC_KEY" | ssh-keygen -l -f - | awk 'NR == 1 { print $1 }')
-    [[ "$bits" =~ ^[0-9]+$ ]] && [ "$bits" -ge 3072 ] || \
+    if ! [[ "$bits" =~ ^[0-9]+$ ]] || [ "$bits" -lt 3072 ]; then
       die 'RSA 公钥至少需要 3072 位；推荐改用 ssh-ed25519。'
+    fi
   fi
 }
 
