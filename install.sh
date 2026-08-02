@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly INSTALLER_VERSION='v1.3.1'
+readonly INSTALLER_VERSION='v1.3.2'
 readonly REPOSITORY='elonjack/vps-security-bootstrap'
 
 RELEASE_VERSION=$INSTALLER_VERSION
@@ -100,4 +100,25 @@ if [ "$KEEP_FILES" -eq 1 ]; then
   printf 'Downloaded files are kept in: %s\n' "$WORK_DIR"
 fi
 
-bash "$SCRIPT_PATH" "${BOOTSTRAP_ARGS[@]}"
+# A curl pipeline makes stdin a pipe.  Interactive modes must read from the
+# controlling terminal, while unattended argument-based runs keep their stdin.
+NEEDS_TTY=0
+if [ "${#BOOTSTRAP_ARGS[@]}" -eq 0 ]; then
+  NEEDS_TTY=1
+else
+  for bootstrap_arg in "${BOOTSTRAP_ARGS[@]}"; do
+    case "$bootstrap_arg" in
+      --interactive|--firewall|--rotate-telegram-token)
+        NEEDS_TTY=1
+        break
+        ;;
+    esac
+  done
+fi
+
+if [ "$NEEDS_TTY" -eq 1 ]; then
+  [ -r /dev/tty ] || die 'Interactive mode requires a terminal. Run the downloaded installer from a terminal, or use unattended bootstrap arguments.'
+  bash "$SCRIPT_PATH" "${BOOTSTRAP_ARGS[@]}" </dev/tty
+else
+  bash "$SCRIPT_PATH" "${BOOTSTRAP_ARGS[@]}"
+fi
