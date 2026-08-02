@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly INSTALLER_VERSION='v1.3.2'
+readonly INSTALLER_VERSION='v1.3.3'
 readonly REPOSITORY='elonjack/vps-security-bootstrap'
 
 RELEASE_VERSION=$INSTALLER_VERSION

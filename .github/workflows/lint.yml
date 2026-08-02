@@ -44,6 +44,10 @@ jobs:
           grep -F 'type filter hook input priority filter; policy drop;' bootstrap.sh
           grep -F 'flags interval' bootstrap.sh
           grep -F 'nft delete table inet "$FIREWALL_TABLE"' bootstrap.sh
+          grep -F '停用本脚本管理的防火墙' bootstrap.sh
+          grep -F '重新加载本脚本管理的防火墙' bootstrap.sh
+          ! grep -F 'systemctl stop nftables' bootstrap.sh
+          ! grep -F 'systemctl restart nftables' bootstrap.sh
           grep -F '20000-20199' README.md
           git diff --check
 
