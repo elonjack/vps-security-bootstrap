@@ -295,7 +295,7 @@ render_firewall_config() {
 
   {
     cat <<EOF
-# Managed by $APP. Use “nftables 防火墙操作” in bootstrap.sh to change ports.
+# Managed by $APP. Use the nftables firewall menu in bootstrap.sh to change ports.
 # This file owns only table inet $FIREWALL_TABLE; it never flushes the global ruleset.
 table inet $FIREWALL_TABLE {
   set allowed_tcp_ports {
