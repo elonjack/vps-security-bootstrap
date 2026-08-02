@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.2'
+readonly SCRIPT_VERSION='v1.3.3'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -220,7 +220,7 @@ print_banner() {
   for line in "${logo[@]}"; do
     printf '%b%s%b\n' "$STYLE_TITLE" "$line" "$STYLE_RESET"
   done
-  printf '%bPIKACHU SECURITY BOOTSTRAP %s · DEBIAN 12 / 13%b\n' "$STYLE_TITLE" "$SCRIPT_VERSION" "$STYLE_RESET"
+  printf '%bVPS SECURITY BOOTSTRAP %s · DEBIAN 12 / 13%b\n' "$STYLE_TITLE" "$SCRIPT_VERSION" "$STYLE_RESET"
 }
 
 detect_current_ssh_port() {
@@ -461,12 +461,28 @@ configure_nftables_firewall() {
 }
 
 show_firewall_status() {
-  local ssh_port extra_tcp extra_udp
+  local ssh_port extra_tcp extra_udp managed_status table_status managed_enabled=0
   ssh_port=$(detect_current_ssh_port)
   extra_tcp=$(load_firewall_port_state "$FIREWALL_TCP_PORTS_FILE")
   extra_udp=$(load_firewall_port_state "$FIREWALL_UDP_PORTS_FILE")
+  if [ -x "$FIREWALL_LOADER" ] && [ -f "$NFTABLES_DROPIN" ]; then
+    managed_enabled=1
+    managed_status='已启用（开机自动加载）'
+  else
+    managed_status='已停用（保留端口设置，未加载默认拒绝规则）'
+  fi
+  if nft list table inet "$FIREWALL_TABLE" >/dev/null 2>&1; then
+    table_status='已加载'
+  else
+    table_status='未加载'
+  fi
   printf '\n%b当前脚本管理的 nftables 防火墙：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
-  printf '  入站默认策略：拒绝（仅以下端口放行）\n'
+  printf '  本脚本防火墙：%s；规则表：%s\n' "$managed_status" "$table_status"
+  if [ "$managed_enabled" -eq 1 ]; then
+    printf '  入站默认策略：拒绝（仅以下端口放行）\n'
+  else
+    printf '  入站默认策略：未由本脚本限制\n'
+  fi
   printf '  SSH TCP：%s\n' "$ssh_port"
   printf '  额外 TCP：%s\n' "${extra_tcp:-无}"
   printf '  额外 UDP：%s\n' "${extra_udp:-无}"
@@ -477,8 +493,49 @@ show_firewall_status() {
     printf '\n%b实际生效规则：%b\n' "$STYLE_INFO" "$STYLE_RESET"
     nft list table inet "$FIREWALL_TABLE"
   else
-    printf '%b尚未初始化脚本管理的防火墙；选择“恢复为仅放行 SSH”即可创建。%b\n' "$STYLE_ERROR" "$STYLE_RESET"
+    printf '%b本脚本管理的防火墙当前未加载；选择“启用 / 恢复为仅放行 SSH”即可启用。%b\n' "$STYLE_ERROR" "$STYLE_RESET"
   fi
+}
+
+disable_managed_firewall() {
+  local dropin_backup
+  [ -d "$CONF_DIR" ] || return 0
+  dropin_backup=$(mktemp "$CONF_DIR/nftables-dropin-disable.XXXXXX") || return 1
+  if [ -f "$NFTABLES_DROPIN" ]; then
+    cp -a "$NFTABLES_DROPIN" "$dropin_backup" || {
+      rm -f "$dropin_backup"
+      return 1
+    }
+  else
+    : > "$dropin_backup"
+  fi
+  if ! rm -f "$NFTABLES_DROPIN" || ! systemctl daemon-reload; then
+    if [ -s "$dropin_backup" ]; then
+      install -d -m 0755 "$NFTABLES_DROPIN_DIR"
+      cp -a "$dropin_backup" "$NFTABLES_DROPIN"
+    fi
+    systemctl daemon-reload 2>/dev/null || true
+    rm -f "$dropin_backup"
+    return 1
+  fi
+  rm -f "$dropin_backup"
+  nft delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+}
+
+enable_managed_firewall() {
+  local ssh_port current_tcp current_udp
+  ssh_port=$(detect_current_ssh_port)
+  current_tcp=$(load_firewall_port_state "$FIREWALL_TCP_PORTS_FILE")
+  current_udp=$(load_firewall_port_state "$FIREWALL_UDP_PORTS_FILE")
+  apply_firewall_policy "$ssh_port" "$current_tcp" "$current_udp"
+}
+
+reload_managed_firewall() {
+  [ -x "$FIREWALL_LOADER" ] && [ -f "$NFTABLES_DROPIN" ] || {
+    printf '本脚本管理的防火墙当前未启用；请先选择“启用本脚本管理的防火墙”。\n' >&2
+    return 1
+  }
+  enable_managed_firewall
 }
 
 prompt_firewall_ports() {
@@ -508,9 +565,12 @@ firewall_menu() {
     menu_option 1 '查看放行端口和实际生效规则'
     menu_option 2 '设置额外 TCP 放行端口' "当前：${current_tcp:-无}"
     menu_option 3 '设置额外 UDP 放行端口' "当前：${current_udp:-无}"
-    menu_option 4 '恢复为仅放行 SSH 端口' '清空所有额外 TCP/UDP 端口'
+    menu_option 4 '启用本脚本管理的防火墙' '保留已设置的 TCP/UDP 端口，并开启默认拒绝入站'
+    menu_option 5 '恢复为仅放行 SSH 端口' '清空所有额外 TCP/UDP 端口，并开启默认拒绝入站'
+    menu_option 6 '停用本脚本管理的防火墙' '仅移除本脚本的默认拒绝规则；不停止 nftables 服务或修改其他规则'
+    menu_option 7 '重新加载本脚本管理的防火墙' '仅校验并重载本脚本的规则表；不重启 nftables 服务'
     menu_option 0 '返回主菜单'
-    if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/0，无默认值]：${STYLE_RESET}" choice; then
+    if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/5/6/7/0，无默认值]：${STYLE_RESET}" choice; then
       die '未读取到菜单选项，操作已取消。'
     fi
     ssh_port=$(detect_current_ssh_port)
@@ -529,12 +589,27 @@ firewall_menu() {
         success 'nftables UDP 放行端口已更新。'
         ;;
       4)
-        ask_yes_no '确认清空所有额外端口，只保留 SSH TCP 端口？' n || continue
-        apply_firewall_policy "$ssh_port" '' '' || die '恢复仅 SSH 防火墙失败；已尝试恢复原有配置。'
-        success "防火墙已收敛为仅放行 SSH TCP $ssh_port。"
+        ask_yes_no '确认启用本脚本管理的默认拒绝规则，并保留当前端口设置？' n || continue
+        enable_managed_firewall || die '启用本脚本管理的防火墙失败；已尝试恢复原有配置。'
+        success '本脚本管理的防火墙已启用，并已保留当前端口设置。'
+        ;;
+      5)
+        ask_yes_no '确认清空所有额外端口，并启用仅放行 SSH 的默认拒绝入站规则？' n || continue
+        apply_firewall_policy "$ssh_port" '' '' || die '启用仅 SSH 防火墙失败；已尝试恢复原有配置。'
+        success "防火墙已启用：仅放行 SSH TCP $ssh_port。"
+        ;;
+      6)
+        ask_yes_no '确认停用本脚本管理的默认拒绝规则？SSH 和其他服务将不再由本脚本的主机防火墙限制。' n || continue
+        disable_managed_firewall || die '停用本脚本管理的防火墙失败；原有规则已尽力保留。'
+        success '本脚本管理的防火墙已停用；nftables 服务、Fail2ban 和其他应用规则未被停止或删除。'
+        ;;
+      7)
+        ask_yes_no '确认重新加载本脚本管理的防火墙规则？' n || continue
+        reload_managed_firewall || die '重新加载本脚本管理的防火墙失败；请查看状态和实际规则。'
+        success '本脚本管理的防火墙规则已重新加载。'
         ;;
       0) return 0 ;;
-      *) printf '%b请输入 1、2、3、4 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
+      *) printf '%b请输入 1、2、3、4、5、6、7 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
     esac
   done
 }
@@ -562,9 +637,9 @@ interactive_wizard() {
   print_banner
   if [ "$ROTATE_TELEGRAM" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ]; then
     printf '%b请选择操作：%b\n' "$STYLE_MENU" "$STYLE_RESET"
-    menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH 和 Fail2ban'
+    menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH / Fail2ban，并启用本脚本防火墙'
     menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
-    menu_option 3 'nftables 防火墙操作' '查看或管理 TCP/UDP 放行端口和端口范围'
+    menu_option 3 'nftables 防火墙操作' '查看、管理、启用、停用或重载本脚本的防火墙规则'
     menu_option 0 '退出，不做任何修改'
     while true; do
       if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/0，无默认值]：${STYLE_RESET}" answer; then
@@ -601,7 +676,9 @@ EOF
     prompt_block <<EOF
 注意：
   1. SSH 端口将从 $current_port 改为 $SSH_PORT。
-  2. 请先在云厂商安全组/防火墙中放行新端口，否则新的 SSH 连接会失败。
+  2. 脚本会先同时放行旧端口和新端口；SSH 重载成功后，旧端口将拒绝新的连接。
+  3. 当前已建立的 SSH 会话会继续可用，但关闭或断开后不能再通过旧端口重连。
+  4. 请先在云厂商安全组/防火墙中放行新端口，并在退出当前窗口前另开终端测试新端口。
 EOF
     ask_yes_no '已确认新端口已放行吗？' n || die '已取消；请先放行新端口后再运行。'
   fi
@@ -639,7 +716,7 @@ EOF
   4. Fail2ban 策略：3 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口
   5. 系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)
   6. Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)
-  7. nftables：启用默认拒绝入站；仅放行 SSH，额外端口稍后在防火墙菜单管理
+  7. nftables：启用默认拒绝入站；放行 SSH，并保留已配置的额外端口（如有）
 EOF
   [ -z "$TELEGRAM_TOKEN" ] || prompt_line "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
   ask_yes_no '确认执行以上配置？' n || die '已取消，未修改系统。'
