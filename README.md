@@ -19,6 +19,8 @@
 curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh | sudo bash
 ```
 
+首次 Debian 加固会启用 nftables：默认拒绝所有入站，仅放行 SSH TCP 端口、已建立连接、回环和必要 ICMP/ICMPv6。网站、HY2、VPN 等服务端口请在后续的“nftables 防火墙操作”菜单中明确添加。
+
 ### Windows 11 Pro / Enterprise / Education
 
 以“管理员身份”打开 Windows PowerShell：
@@ -44,12 +46,12 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.2.1`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.0`。
 
 ### Debian
 
 ```bash
-version=v1.2.1
+version=v1.3.0
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -60,7 +62,7 @@ sudo bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.2.1'
+$version = 'v1.3.0'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
@@ -79,6 +81,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 | 远程入口 | root SSH 公钥登录 | RDP |
 | 端口 | 可设置 SSH 端口 | 可重复修改 RDP 端口 |
 | 凭据防护 | 禁用密码与键盘交互认证 | NLA、TLS、高加密 |
+| 主机防火墙 | nftables 默认拒绝入站；SSH 与明确配置的 TCP/UDP 端口 | Windows 防火墙固定 IP/CIDR 白名单 |
 | 爆破缓解 | Fail2ban + recidive | RDP Guard + 账户短时锁定 |
 | 来源限制 | Fail2ban 可信 IP/CIDR | Windows 防火墙固定 IP/CIDR 白名单 |
 | Telegram | SSH 成功登录、Fail2ban 封禁 | RDP 成功登录、封禁、解封 |
@@ -88,7 +91,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 ## 使用前必读
 
-1. 改 SSH/RDP 端口前，先在 VPS 厂商安全组或云防火墙放行新端口。
+1. 改 SSH/RDP 端口前，先在 VPS 厂商安全组或云防火墙放行新端口。Debian 还需要在本脚本的 nftables 菜单放行该端口。
 2. 新连接验证成功前，保持当前 SSH/RDP 会话或厂商控制台打开。
 3. 固定公网管理 IP 时，优先配置来源白名单；这比改端口更有效。
 4. Telegram 是告警，不是阻止私钥泄露或账户接管的防线。
@@ -97,6 +100,23 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ## Debian 12 / 13
 
 向导会要求粘贴 `.pub` 公钥的一整行，只保留这把 root 公钥并关闭 SSH 密码、键盘交互、转发和隧道功能。它在写入后使用 `sshd -t` 与最终生效配置校验；Fail2ban 配置失败时会恢复本次修改前的配置。
+
+首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口，SSH 校验成功后自动仅保留新端口。
+
+以后重新运行脚本并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
+
+```bash
+sudo bash bootstrap.sh --firewall
+```
+
+菜单支持查看实际规则、更新额外 TCP/UDP 端口，以及恢复为仅 SSH。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
+
+```text
+TCP：80,443,51820
+UDP：20000-20199
+```
+
+上例会放行网站 TCP 80/443、一个 TCP 服务端口，以及 UDP 连续 200 个端口。若 HY2 配置使用 UDP 跳跃端口范围，可在 UDP 项填写例如 `20000-20199`；不要为不需要的协议额外放行端口。云安全组和本机 nftables 都必须放行，服务才能从公网访问。
 
 默认不会执行整机 `apt upgrade`，需要你明确确认。SSH 端口切换前会检查 TCP/UDP 监听冲突。
 
