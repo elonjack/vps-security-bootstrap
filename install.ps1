@@ -10,7 +10,7 @@
 [CmdletBinding()]
 param(
   [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+$')]
-  [string]$Version = 'v1.3.0',
+  [string]$Version = 'v1.3.1',
 
   [switch]$Keep,
 
