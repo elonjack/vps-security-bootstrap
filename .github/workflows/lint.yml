@@ -38,6 +38,8 @@ jobs:
           grep -F "version=$version" README.md
           grep -F "sha256sum --check install.sh.sha256" README.md
           grep -F 'sha256sum --check --status bootstrap.sh.sha256' install.sh
+          grep -F 'bash "$SCRIPT_PATH" "${BOOTSTRAP_ARGS[@]}" </dev/tty' install.sh
+          grep -F '[ -r /dev/tty ]' install.sh
           grep -F "readonly FIREWALL_TABLE='vps_security_bootstrap'" bootstrap.sh
           grep -F 'type filter hook input priority filter; policy drop;' bootstrap.sh
           grep -F 'flags interval' bootstrap.sh

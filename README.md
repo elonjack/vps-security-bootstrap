@@ -42,16 +42,16 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 | Debian 12 / 13 | `install.sh` | 识别 Debian，下载并校验 `bootstrap.sh`，再启动 SSH 向导 |
 | Windows 11 | `install.ps1` | 识别 Windows 11，下载并校验 `windows-bootstrap.ps1`，再启动 RDP 向导 |
 
-你不需要手动下载主脚本；两个安装器只是各自平台的最短、最规范入口。
+你不需要手动下载主脚本；两个安装器只是各自平台的最短、最规范入口。Debian 的短命令会把交互输入自动切回当前 SSH 终端，因此可直接复制执行。
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.1`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.2`。
 
 ### Debian
 
 ```bash
-version=v1.3.1
+version=v1.3.2
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -62,7 +62,7 @@ sudo bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.1'
+$version = 'v1.3.2'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
