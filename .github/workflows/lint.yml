@@ -27,12 +27,17 @@ jobs:
       - name: Verify script
         run: |
           test "$(head -n 1 bootstrap.sh)" = '#!/usr/bin/env bash'
-          ! grep -n $'\r' bootstrap.sh
-          bash -n bootstrap.sh
-          shellcheck --severity=warning bootstrap.sh
+          test "$(head -n 1 install.sh)" = '#!/usr/bin/env bash'
+          ! grep -n $'\r' bootstrap.sh install.sh
+          bash -n bootstrap.sh install.sh
+          shellcheck --severity=warning bootstrap.sh install.sh
           version=$(sed -n "s/^readonly SCRIPT_VERSION='\\([^']*\\)'$/\\1/p" bootstrap.sh)
+          installer_version=$(sed -n "s/^readonly INSTALLER_VERSION='\\([^']*\\)'$/\\1/p" install.sh)
           test -n "$version"
+          test "$version" = "$installer_version"
           grep -F "version=$version" README.md
+          grep -F "sha256sum --check install.sh.sha256" README.md
+          grep -F 'sha256sum --check --status bootstrap.sh.sha256' install.sh
           git diff --check
 
   powershell:
@@ -56,6 +61,7 @@ jobs:
           Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
 
           $path = Join-Path $PWD 'windows-bootstrap.ps1'
+          $installerPath = Join-Path $PWD 'install.ps1'
           $bytes = [IO.File]::ReadAllBytes($path)
           if ($bytes.Length -lt 3 -or $bytes[0] -ne 0xef -or $bytes[1] -ne 0xbb -or $bytes[2] -ne 0xbf) {
             throw 'windows-bootstrap.ps1 must use UTF-8 with BOM for Windows PowerShell 5.1.'
@@ -63,11 +69,26 @@ jobs:
           if ([IO.File]::ReadAllText($path).Contains("`r")) {
             throw 'windows-bootstrap.ps1 must use LF line endings.'
           }
+          $installerBytes = [IO.File]::ReadAllBytes($installerPath)
+          if ($installerBytes.Length -lt 3 -or $installerBytes[0] -ne 0xef -or $installerBytes[1] -ne 0xbb -or $installerBytes[2] -ne 0xbf) {
+            throw 'install.ps1 must use UTF-8 with BOM for Windows PowerShell 5.1.'
+          }
+          if ([IO.File]::ReadAllText($installerPath).Contains("`r")) {
+            throw 'install.ps1 must use LF line endings.'
+          }
 
           $tokens = $null
           $errors = $null
           [Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors) | Out-Null
           if ($errors.Count) { throw ($errors | ForEach-Object Message | Out-String) }
+          $installerTokens = $null
+          $installerErrors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            $installerPath,
+            [ref]$installerTokens,
+            [ref]$installerErrors
+          ) | Out-Null
+          if ($installerErrors.Count) { throw ($installerErrors | ForEach-Object Message | Out-String) }
 
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
           . $path
@@ -94,6 +115,8 @@ jobs:
 
           $analysis = @(Invoke-ScriptAnalyzer -Path $path -Severity Warning, Error)
           if ($analysis.Count) { throw ($analysis | Format-Table -AutoSize | Out-String) }
+          $installerAnalysis = @(Invoke-ScriptAnalyzer -Path $installerPath -Severity Warning, Error)
+          if ($installerAnalysis.Count) { throw ($installerAnalysis | Format-Table -AutoSize | Out-String) }
 
           if (-not (Test-IpOrCidr '203.0.113.10')) { throw 'IPv4 validation failed.' }
           if (-not (Test-IpOrCidr '2001:db8::/64')) { throw 'IPv6 CIDR validation failed.' }
@@ -125,4 +148,15 @@ jobs:
           $version = $versionMatch.Matches[0].Groups[1].Value
           if (-not (Select-String -Path README.md -SimpleMatch "`$version = '$version'")) {
             throw 'README Windows version does not match the script.'
+          }
+          $installerVersionMatch = Select-String `
+            -Path $installerPath `
+            -Pattern "Version = '(v[^']+)'"
+          if (-not $installerVersionMatch) { throw 'Windows installer version is missing.' }
+          $installerVersion = $installerVersionMatch.Matches[0].Groups[1].Value
+          if ($installerVersion -ne $version) {
+            throw 'Windows installer version does not match the main script.'
+          }
+          if (-not (Select-String -Path $installerPath -SimpleMatch 'Get-FileHash')) {
+            throw 'Windows installer must verify SHA-256 before execution.'
           }
