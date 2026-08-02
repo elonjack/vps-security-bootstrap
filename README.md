@@ -46,12 +46,12 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.0`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.1`。
 
 ### Debian
 
 ```bash
-version=v1.3.0
+version=v1.3.1
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -62,7 +62,7 @@ sudo bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.0'
+$version = 'v1.3.1'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
@@ -103,13 +103,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口，SSH 校验成功后自动仅保留新端口。
 
-以后重新运行脚本并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
+以后重新运行一键安装器并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
 
 ```bash
-sudo bash bootstrap.sh --firewall
+curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh \
+  | sudo bash -s -- --firewall
 ```
 
-菜单支持查看实际规则、更新额外 TCP/UDP 端口，以及恢复为仅 SSH。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
+该命令会下载、校验后临时运行主脚本；不会保留临时文件。菜单支持查看实际规则、更新额外 TCP/UDP 端口，以及恢复为仅 SSH。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
 
 ```text
 TCP：80,443,51820
