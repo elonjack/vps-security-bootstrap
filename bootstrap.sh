@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.2.1'
+readonly SCRIPT_VERSION='v1.3.0'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -16,6 +16,13 @@ readonly NOTIFIER='/usr/local/sbin/vps-security-notify'
 readonly LEGACY_TELEGRAM_CONTROL='/usr/local/sbin/vps-security-telegram-control'
 readonly LEGACY_TELEGRAM_CONTROL_SERVICE='/etc/systemd/system/vps-security-telegram-control.service'
 readonly AUTO_UPGRADES_CONF='/etc/apt/apt.conf.d/52-vps-security-bootstrap-auto-upgrades'
+readonly FIREWALL_TABLE='vps_security_bootstrap'
+readonly FIREWALL_CONFIG="$CONF_DIR/nftables.conf"
+readonly FIREWALL_TCP_PORTS_FILE="$CONF_DIR/firewall-tcp-ports"
+readonly FIREWALL_UDP_PORTS_FILE="$CONF_DIR/firewall-udp-ports"
+readonly FIREWALL_LOADER='/usr/local/sbin/vps-security-load-firewall'
+readonly NFTABLES_DROPIN_DIR='/etc/systemd/system/nftables.service.d'
+readonly NFTABLES_DROPIN="$NFTABLES_DROPIN_DIR/20-vps-security-bootstrap.conf"
 SSH_PORT=52022
 PUBLIC_KEY=''
 PUBLIC_KEY_FILE=''
@@ -31,9 +38,12 @@ SYSTEM_UPGRADE_OPTION=''
 INTERACTIVE=0
 INTERACTIVE_FLAG=0
 ROTATE_TELEGRAM=0
+FIREWALL_ONLY=0
 FAIL2BAN_MUTATION_ACTIVE=0
 FAIL2BAN_WAS_ACTIVE=0
 FAIL2BAN_WAS_ENABLED=0
+NFTABLES_WAS_ACTIVE=0
+NFTABLES_WAS_ENABLED=0
 ORIGINAL_ARGC=$#
 
 if [ -t 1 ] && [ -n "${TERM:-}" ] && [ "${TERM:-}" != dumb ] && [ -z "${NO_COLOR:-}" ]; then
@@ -65,6 +75,9 @@ usage() {
 仅更换 Telegram Bot Token（不修改 SSH、公钥或 Fail2ban 策略）：
   sudo bash bootstrap.sh --rotate-telegram-token
 
+管理脚本专用的 nftables 防火墙规则（不修改 SSH 或公钥）：
+  sudo bash bootstrap.sh --firewall
+
 自动化用法（传入参数，不进入向导）：
 EOF
   cat <<'EOF'
@@ -86,6 +99,7 @@ EOF
   --system-upgrade             执行一次 apt upgrade（参数模式默认跳过）
   --skip-system-upgrade        跳过 apt upgrade（兼容旧用法；仍会 apt update 并安装依赖）
   --rotate-telegram-token      交互式更换 Telegram Token，不修改 SSH 或 Fail2ban 策略
+  --firewall                   交互式管理 nftables 放行端口和查看规则
   -h, --help                   显示本帮助
 EOF
 }
@@ -125,6 +139,7 @@ while [ "$#" -gt 0 ]; do
       shift
       ;;
     --rotate-telegram-token) ROTATE_TELEGRAM=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
+    --firewall) FIREWALL_ONLY=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（使用 --help 查看用法）" ;;
   esac
@@ -218,6 +233,312 @@ detect_current_ssh_port() {
   fi
 }
 
+normalize_port_specs() {
+  local raw=${1:-}
+  python3 - "$raw" <<'PY'
+import sys
+
+raw = sys.argv[1].strip()
+if not raw:
+    print('')
+    raise SystemExit(0)
+
+ranges = []
+for item in raw.split(','):
+    item = item.strip()
+    if not item:
+        raise ValueError('不能包含空端口项')
+    pieces = item.split('-', 1)
+    if len(pieces) == 1:
+        if not pieces[0].isdigit():
+            raise ValueError(f'端口格式无效：{item}')
+        start = end = int(pieces[0])
+    else:
+        if not pieces[0].isdigit() or not pieces[1].isdigit():
+            raise ValueError(f'端口范围格式无效：{item}')
+        start, end = map(int, pieces)
+    if not (1 <= start <= end <= 65535):
+        raise ValueError(f'端口必须在 1-65535，且范围起点不得大于终点：{item}')
+    ranges.append((start, end))
+
+merged = []
+for start, end in sorted(ranges):
+    if merged and start <= merged[-1][1] + 1:
+        merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+    else:
+        merged.append((start, end))
+print(','.join(str(start) if start == end else f'{start}-{end}' for start, end in merged))
+PY
+}
+
+load_firewall_port_state() {
+  local file=$1 value=''
+  if [ -e "$file" ]; then
+    [ -f "$file" ] && [ ! -L "$file" ] || die "防火墙端口状态文件必须是普通文件：$file"
+    value=$(head -n 1 "$file")
+  fi
+  normalize_port_specs "$value" || die "防火墙端口状态文件无效：$file"
+}
+
+port_specs_to_nft_elements() {
+  local specs=$1
+  [ -n "$specs" ] || return 0
+  printf '%s' "${specs//,/, }"
+}
+
+render_firewall_config() {
+  local output=$1 ssh_ports=$2 extra_tcp=$3 extra_udp=$4 all_tcp all_udp tcp_elements udp_elements
+  all_tcp=$(normalize_port_specs "$ssh_ports${extra_tcp:+,$extra_tcp}") || return 1
+  all_udp=$(normalize_port_specs "$extra_udp") || return 1
+  tcp_elements=$(port_specs_to_nft_elements "$all_tcp")
+  udp_elements=$(port_specs_to_nft_elements "$all_udp")
+
+  {
+    cat <<EOF
+# Managed by $APP. Use the nftables firewall menu in bootstrap.sh to change ports.
+# This file owns only table inet $FIREWALL_TABLE; it never flushes the global ruleset.
+table inet $FIREWALL_TABLE {
+  set allowed_tcp_ports {
+    type inet_service
+    flags interval
+    elements = { $tcp_elements }
+  }
+
+  set allowed_udp_ports {
+    type inet_service
+    flags interval
+EOF
+    if [ -n "$udp_elements" ]; then
+      printf '    elements = { %s }\n' "$udp_elements"
+    fi
+    cat <<'EOF'
+  }
+
+  chain input {
+    type filter hook input priority filter; policy drop;
+    ct state invalid drop
+    ct state established,related accept
+    iifname "lo" accept
+    ip protocol icmp accept
+    meta l4proto icmpv6 accept
+    tcp dport @allowed_tcp_ports accept
+    udp dport @allowed_udp_ports accept
+  }
+}
+EOF
+  } > "$output"
+}
+
+restore_firewall_files() {
+  local backup_dir=$1 target backup
+  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
+    backup="$backup_dir/$(basename "$target")"
+    if [ -e "$backup" ]; then
+      install -d -m 0755 "$(dirname "$target")"
+      cp -a "$backup" "$target"
+    else
+      rm -f "$target"
+    fi
+  done
+  systemctl daemon-reload 2>/dev/null || true
+}
+
+apply_firewall_policy() {
+  local ssh_ports=$1 extra_tcp=$2 extra_udp=$3
+  local config_tmp tcp_tmp udp_tmp loader_tmp validation_tmp backup_dir target nft_bin
+  local -a targets
+
+  command -v python3 >/dev/null 2>&1 || {
+    printf '未找到 python3，无法校验端口范围。\n' >&2
+    return 1
+  }
+  command -v nft >/dev/null 2>&1 || {
+    printf '未找到 nft，无法配置防火墙。\n' >&2
+    return 1
+  }
+  systemctl cat nftables.service >/dev/null 2>&1 || {
+    printf '未找到 nftables.service，无法持久化防火墙。\n' >&2
+    return 1
+  }
+
+  extra_tcp=$(normalize_port_specs "$extra_tcp") || return 1
+  extra_udp=$(normalize_port_specs "$extra_udp") || return 1
+  install -d -o root -g root -m 0700 "$CONF_DIR"
+  install -d -o root -g root -m 0755 "$NFTABLES_DROPIN_DIR"
+  config_tmp=$(mktemp "$CONF_DIR/nftables.conf.XXXXXX") || return 1
+  tcp_tmp=$(mktemp "$CONF_DIR/firewall-tcp-ports.XXXXXX") || { rm -f "$config_tmp"; return 1; }
+  udp_tmp=$(mktemp "$CONF_DIR/firewall-udp-ports.XXXXXX") || { rm -f "$config_tmp" "$tcp_tmp"; return 1; }
+  loader_tmp=$(mktemp "$CONF_DIR/nftables-loader.XXXXXX") || { rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp"; return 1; }
+  validation_tmp=$(mktemp "$CONF_DIR/nftables-validation.XXXXXX") || { rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp"; return 1; }
+  backup_dir=$(mktemp -d "$CONF_DIR/firewall-rollback.XXXXXX") || {
+    rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
+    return 1
+  }
+
+  if ! render_firewall_config "$config_tmp" "$ssh_ports" "$extra_tcp" "$extra_udp"; then
+    rm -rf -- "$backup_dir"
+    rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
+    return 1
+  fi
+  printf '%s\n' "$extra_tcp" > "$tcp_tmp"
+  printf '%s\n' "$extra_udp" > "$udp_tmp"
+  chmod 0644 "$config_tmp"
+  chmod 0600 "$tcp_tmp" "$udp_tmp"
+
+  # Validate against a throwaway table name so a currently loaded managed table cannot mask syntax errors.
+  sed "s/$FIREWALL_TABLE/${FIREWALL_TABLE}_validation_$$/g" "$config_tmp" > "$validation_tmp"
+  if ! nft -c -f "$validation_tmp"; then
+    rm -rf -- "$backup_dir"
+    rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
+    return 1
+  fi
+  rm -f "$validation_tmp"
+
+  targets=("$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN")
+  for target in "${targets[@]}"; do
+    if [ -e "$target" ]; then
+      cp -a "$target" "$backup_dir/$(basename "$target")" || {
+        rm -rf -- "$backup_dir"
+        rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp"
+        return 1
+      }
+    fi
+  done
+
+  nft_bin=$(command -v nft)
+  cat > "$loader_tmp" <<EOF
+#!/usr/bin/env bash
+set -Eeuo pipefail
+"$nft_bin" delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+exec "$nft_bin" -f "$FIREWALL_CONFIG"
+EOF
+  chmod 0700 "$loader_tmp"
+  if ! mv -f "$config_tmp" "$FIREWALL_CONFIG" ||
+    ! mv -f "$tcp_tmp" "$FIREWALL_TCP_PORTS_FILE" ||
+    ! mv -f "$udp_tmp" "$FIREWALL_UDP_PORTS_FILE" ||
+    ! mv -f "$loader_tmp" "$FIREWALL_LOADER" ||
+    ! printf '[Service]\nExecStartPost=%s\n' "$FIREWALL_LOADER" > "$NFTABLES_DROPIN" ||
+    ! systemctl daemon-reload ||
+    ! systemctl enable nftables; then
+    restore_firewall_files "$backup_dir"
+    rm -rf -- "$backup_dir"
+    rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp"
+    return 1
+  fi
+
+  # Only the table owned by this script is replaced. Fail2ban and other applications keep their own tables.
+  if systemctl is-active --quiet nftables; then
+    if ! "$FIREWALL_LOADER"; then
+      restore_firewall_files "$backup_dir"
+      nft delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+      [ ! -f "$FIREWALL_LOADER" ] || "$FIREWALL_LOADER" 2>/dev/null || true
+      rm -rf -- "$backup_dir"
+      return 1
+    fi
+  elif ! systemctl start nftables; then
+    restore_firewall_files "$backup_dir"
+    nft delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+    [ ! -f "$FIREWALL_LOADER" ] || "$FIREWALL_LOADER" 2>/dev/null || true
+    rm -rf -- "$backup_dir"
+    return 1
+  fi
+
+  if ! nft list table inet "$FIREWALL_TABLE" >/dev/null; then
+    restore_firewall_files "$backup_dir"
+    nft delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+    [ ! -f "$FIREWALL_LOADER" ] || "$FIREWALL_LOADER" 2>/dev/null || true
+    rm -rf -- "$backup_dir"
+    return 1
+  fi
+  rm -rf -- "$backup_dir"
+}
+
+configure_nftables_firewall() {
+  local ssh_ports=$1 extra_tcp extra_udp
+  extra_tcp=$(load_firewall_port_state "$FIREWALL_TCP_PORTS_FILE")
+  extra_udp=$(load_firewall_port_state "$FIREWALL_UDP_PORTS_FILE")
+  apply_firewall_policy "$ssh_ports" "$extra_tcp" "$extra_udp"
+}
+
+show_firewall_status() {
+  local ssh_port extra_tcp extra_udp
+  ssh_port=$(detect_current_ssh_port)
+  extra_tcp=$(load_firewall_port_state "$FIREWALL_TCP_PORTS_FILE")
+  extra_udp=$(load_firewall_port_state "$FIREWALL_UDP_PORTS_FILE")
+  printf '\n%b当前脚本管理的 nftables 防火墙：%b\n' "$STYLE_TITLE" "$STYLE_RESET"
+  printf '  入站默认策略：拒绝（仅以下端口放行）\n'
+  printf '  SSH TCP：%s\n' "$ssh_port"
+  printf '  额外 TCP：%s\n' "${extra_tcp:-无}"
+  printf '  额外 UDP：%s\n' "${extra_udp:-无}"
+  printf '  nftables 服务：%s / 开机启动：%s\n' \
+    "$(systemctl is-active nftables 2>/dev/null || true)" \
+    "$(systemctl is-enabled nftables 2>/dev/null || true)"
+  if nft list table inet "$FIREWALL_TABLE" >/dev/null 2>&1; then
+    printf '\n%b实际生效规则：%b\n' "$STYLE_INFO" "$STYLE_RESET"
+    nft list table inet "$FIREWALL_TABLE"
+  else
+    printf '%b尚未初始化脚本管理的防火墙；选择“恢复为仅放行 SSH”即可创建。%b\n' "$STYLE_ERROR" "$STYLE_RESET"
+  fi
+}
+
+prompt_firewall_ports() {
+  local protocol=$1 current=$2 updated
+  prompt_block <<EOF
+${protocol} 端口格式：单端口、范围，或逗号组合。
+示例：80,443,51820,20000-20199
+直接回车 = 不额外放行任何 ${protocol} 端口（会清空当前 ${protocol} 额外规则）。
+EOF
+  if ! read -r -p "${STYLE_PROMPT}新的额外 ${protocol} 端口 [当前：${current:-无}]：${STYLE_RESET}" updated; then
+    die '未读取到端口输入，操作已取消。'
+  fi
+  normalize_port_specs "$updated" || die '端口格式无效；请使用 1-65535 的端口或端口范围。'
+}
+
+firewall_menu() {
+  local choice current_tcp current_udp new_ports ssh_port
+  [ -t 0 ] || die 'nftables 防火墙菜单需要交互式终端。'
+  info '检查 nftables 与端口校验依赖'
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get -o DPkg::Lock::Timeout=60 update
+  apt-get -o DPkg::Lock::Timeout=60 install -y nftables python3-minimal
+  while true; do
+    current_tcp=$(load_firewall_port_state "$FIREWALL_TCP_PORTS_FILE")
+    current_udp=$(load_firewall_port_state "$FIREWALL_UDP_PORTS_FILE")
+    printf '\n%b请选择 nftables 防火墙操作：%b\n' "$STYLE_MENU" "$STYLE_RESET"
+    menu_option 1 '查看放行端口和实际生效规则'
+    menu_option 2 '设置额外 TCP 放行端口' "当前：${current_tcp:-无}"
+    menu_option 3 '设置额外 UDP 放行端口' "当前：${current_udp:-无}"
+    menu_option 4 '恢复为仅放行 SSH 端口' '清空所有额外 TCP/UDP 端口'
+    menu_option 0 '返回主菜单'
+    if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/0，无默认值]：${STYLE_RESET}" choice; then
+      die '未读取到菜单选项，操作已取消。'
+    fi
+    ssh_port=$(detect_current_ssh_port)
+    case "$choice" in
+      1) show_firewall_status ;;
+      2)
+        new_ports=$(prompt_firewall_ports TCP "$current_tcp")
+        ask_yes_no "确认更新额外 TCP 端口为：${new_ports:-无}？" n || continue
+        apply_firewall_policy "$ssh_port" "$new_ports" "$current_udp" || die '更新 nftables TCP 规则失败；已尝试恢复原有配置。'
+        success 'nftables TCP 放行端口已更新。'
+        ;;
+      3)
+        new_ports=$(prompt_firewall_ports UDP "$current_udp")
+        ask_yes_no "确认更新额外 UDP 端口为：${new_ports:-无}？" n || continue
+        apply_firewall_policy "$ssh_port" "$current_tcp" "$new_ports" || die '更新 nftables UDP 规则失败；已尝试恢复原有配置。'
+        success 'nftables UDP 放行端口已更新。'
+        ;;
+      4)
+        ask_yes_no '确认清空所有额外端口，只保留 SSH TCP 端口？' n || continue
+        apply_firewall_policy "$ssh_port" '' '' || die '恢复仅 SSH 防火墙失败；已尝试恢复原有配置。'
+        success "防火墙已收敛为仅放行 SSH TCP $ssh_port。"
+        ;;
+      0) return 0 ;;
+      *) printf '%b请输入 1、2、3、4 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
+    esac
+  done
+}
+
 prompt_for_public_key() {
   while true; do
     if ! read -r -p "${STYLE_PROMPT}root SSH 公钥：${STYLE_RESET}" PUBLIC_KEY; then
@@ -239,24 +560,27 @@ interactive_wizard() {
   [ -t 0 ] || die '交互式向导需要终端；自动化运行请传入 --public-key-file 等参数。'
   clear 2>/dev/null || true
   print_banner
-  if [ "$ROTATE_TELEGRAM" -eq 0 ]; then
+  if [ "$ROTATE_TELEGRAM" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ]; then
     printf '%b请选择操作：%b\n' "$STYLE_MENU" "$STYLE_RESET"
     menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH 和 Fail2ban'
     menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
+    menu_option 3 'nftables 防火墙操作' '查看或管理 TCP/UDP 放行端口和端口范围'
     menu_option 0 '退出，不做任何修改'
     while true; do
-      if ! read -r -p "${STYLE_MENU}请选择 [1/2/0，无默认值]：${STYLE_RESET}" answer; then
+      if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/0，无默认值]：${STYLE_RESET}" answer; then
         die '未读取到菜单选项，操作已取消。'
       fi
       case "$answer" in
         1) break ;;
         2) ROTATE_TELEGRAM=1; break ;;
+        3) FIREWALL_ONLY=1; break ;;
         0) exit 0 ;;
-        *) printf '%b请输入 1、2 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
+        *) printf '%b请输入 1、2、3 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
       esac
     done
   fi
   [ "$ROTATE_TELEGRAM" -eq 0 ] || return 0
+  [ "$FIREWALL_ONLY" -eq 0 ] || return 0
   prompt_block <<'EOF'
 注意：
   1. 只保留 root 作为 SSH 用户，并且只允许本次提供的 SSH 公钥登录。
@@ -315,6 +639,7 @@ EOF
   4. Fail2ban 策略：3 分钟内 SSH 失败 3 次即封禁；反复封禁来源将永久封禁全部端口
   5. 系统立即升级：$([ "$SYSTEM_UPGRADE" -eq 1 ] && echo 是 || echo 否)
   6. Telegram 通知：$([ -n "$TELEGRAM_TOKEN" ] && echo 是 || echo 否)
+  7. nftables：启用默认拒绝入站；仅放行 SSH，额外端口稍后在防火墙菜单管理
 EOF
   [ -z "$TELEGRAM_TOKEN" ] || prompt_line "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
   ask_yes_no '确认执行以上配置？' n || die '已取消，未修改系统。'
@@ -332,6 +657,10 @@ case "${VERSION_ID%%.*}" in
 esac
 [ -d /run/systemd/system ] || die '此脚本需要 systemd。'
 [ "$INTERACTIVE" -eq 0 ] || interactive_wizard
+[ "$FIREWALL_ONLY" -eq 0 ] || {
+  firewall_menu
+  exit 0
+}
 if ! [[ "$SSH_PORT" =~ ^[1-9][0-9]{0,4}$ ]] || [ "$SSH_PORT" -gt 65535 ]; then
   die '--ssh-port 必须是 1–65535。'
 fi
@@ -516,8 +845,15 @@ backup_if_exists "$NOTIFIER" telegram-notifier.before
 backup_if_exists "$CONF_DIR/telegram.env" telegram-env.before
 backup_if_exists "$LEGACY_TELEGRAM_CONTROL" legacy-telegram-control.before
 backup_if_exists "$LEGACY_TELEGRAM_CONTROL_SERVICE" legacy-telegram-control-service.before
+backup_if_exists "$FIREWALL_CONFIG" firewall-config.before
+backup_if_exists "$FIREWALL_TCP_PORTS_FILE" firewall-tcp-ports.before
+backup_if_exists "$FIREWALL_UDP_PORTS_FILE" firewall-udp-ports.before
+backup_if_exists "$FIREWALL_LOADER" firewall-loader.before
+backup_if_exists "$NFTABLES_DROPIN" nftables-dropin.before
 systemctl is-active --quiet fail2ban 2>/dev/null && FAIL2BAN_WAS_ACTIVE=1
 systemctl is-enabled --quiet fail2ban 2>/dev/null && FAIL2BAN_WAS_ENABLED=1
+systemctl is-active --quiet nftables 2>/dev/null && NFTABLES_WAS_ACTIVE=1
+systemctl is-enabled --quiet nftables 2>/dev/null && NFTABLES_WAS_ENABLED=1
 
 restore_backup_or_remove() {
   local target=$1 backup_name=$2
@@ -529,6 +865,29 @@ restore_backup_or_remove() {
   fi
 }
 
+restore_firewall_state() {
+  local target backup_name
+  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
+    case "$target" in
+      "$FIREWALL_CONFIG") backup_name=firewall-config.before ;;
+      "$FIREWALL_TCP_PORTS_FILE") backup_name=firewall-tcp-ports.before ;;
+      "$FIREWALL_UDP_PORTS_FILE") backup_name=firewall-udp-ports.before ;;
+      "$FIREWALL_LOADER") backup_name=firewall-loader.before ;;
+      "$NFTABLES_DROPIN") backup_name=nftables-dropin.before ;;
+    esac
+    restore_backup_or_remove "$target" "$backup_name"
+  done
+  systemctl daemon-reload 2>/dev/null || true
+  nft delete table inet "$FIREWALL_TABLE" 2>/dev/null || true
+  [ ! -f "$FIREWALL_LOADER" ] || "$FIREWALL_LOADER" 2>/dev/null || true
+  if [ "$NFTABLES_WAS_ACTIVE" -eq 0 ]; then
+    systemctl stop nftables 2>/dev/null || true
+  fi
+  if [ "$NFTABLES_WAS_ENABLED" -eq 0 ]; then
+    systemctl disable nftables 2>/dev/null || true
+  fi
+}
+
 restore_ssh_state() {
   printf '%b正在恢复运行前的 SSH 公钥和配置……%b\n' "$STYLE_ERROR" "$STYLE_RESET" >&2
   install -d -o root -g root -m 0700 /root/.ssh
@@ -537,6 +896,7 @@ restore_ssh_state() {
   restore_backup_or_remove /root/.ssh/authorized_keys2 root-authorized-keys2.before
   restore_backup_or_remove "$SSH_DROPIN" ssh-dropin.before
   restore_backup_or_remove "$LEGACY_SSH_DROPIN" ssh-dropin-legacy.before
+  restore_firewall_state
   if sshd -t; then
     systemctl reload ssh 2>/dev/null || true
   fi
@@ -601,8 +961,7 @@ fi
 echo '提示：如恰好有其他软件更新正在结束，脚本最多等待 1 分钟；请不要删除任何 lock 文件。'
 apt-get -o DPkg::Lock::Timeout=60 update
 [ "$SYSTEM_UPGRADE" -eq 0 ] || apt-get -o DPkg::Lock::Timeout=60 upgrade -y
-APT_PACKAGES=(openssh-server fail2ban nftables curl iproute2 libpam-modules)
-[ -z "$IGNORE_IP" ] || APT_PACKAGES+=(python3-minimal)
+APT_PACKAGES=(openssh-server fail2ban nftables curl iproute2 libpam-modules python3-minimal)
 apt-get -o DPkg::Lock::Timeout=60 install -y "${APT_PACKAGES[@]}"
 command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 sshd。'
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
@@ -616,6 +975,11 @@ if [ "$SSH_PORT" != "$CURRENT_SSH_PORT" ]; then
   UDP_LISTENER=$(ss -H -lun "sport = :$SSH_PORT" 2>/dev/null || true)
   [ -z "$TCP_LISTENER$UDP_LISTENER" ] || \
     die "SSH 端口 $SSH_PORT 已被其他 TCP/UDP 服务监听，请换一个端口。"
+fi
+
+info '启用 nftables 默认拒绝入站防火墙（过渡期间同时放行旧/新 SSH 端口）'
+if ! configure_nftables_firewall "$CURRENT_SSH_PORT,$SSH_PORT"; then
+  die 'nftables 防火墙配置失败；SSH、公钥和 Fail2ban 尚未修改。'
 fi
 
 info '覆盖 root 的 SSH 公钥（仅保留本次提供的公钥）'
@@ -738,6 +1102,12 @@ info '应用 SSH 配置'
 if ! systemctl reload ssh; then
   restore_ssh_state
   die 'SSH 服务重载失败；已恢复运行前的 SSH 公钥和配置。'
+fi
+
+info '收敛 nftables 防火墙为仅放行新 SSH 端口和已配置的额外端口'
+if ! configure_nftables_firewall "$SSH_PORT"; then
+  restore_ssh_state
+  die 'nftables 防火墙收敛失败；已恢复运行前的 SSH 公钥和配置。请保持当前会话并检查防火墙状态。'
 fi
 
 info '写入 Fail2ban 配置（systemd journal + nftables）'
