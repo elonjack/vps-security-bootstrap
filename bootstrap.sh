@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.3'
+readonly SCRIPT_VERSION='v1.3.4'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -540,7 +540,9 @@ reload_managed_firewall() {
 
 prompt_firewall_ports() {
   local protocol=$1 current=$2 updated
-  prompt_block <<EOF
+  # This function returns the normalized port specification on stdout. Keep
+  # explanatory text on stderr so command substitution captures only the value.
+  prompt_block >&2 <<EOF
 ${protocol} 端口格式：单端口、范围，或逗号组合。
 示例：80,443,51820,20000-20199
 直接回车 = 不额外放行任何 ${protocol} 端口（会清空当前 ${protocol} 额外规则）。

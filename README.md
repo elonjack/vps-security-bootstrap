@@ -46,12 +46,12 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.3`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.4`。
 
 ### Debian
 
 ```bash
-version=v1.3.3
+version=v1.3.4
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -62,7 +62,7 @@ sudo bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.3'
+$version = 'v1.3.4'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
