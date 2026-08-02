@@ -19,7 +19,7 @@
 curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh | sudo bash
 ```
 
-首次 Debian 加固会启用 nftables：默认拒绝所有入站，仅放行 SSH TCP 端口、已建立连接、回环和必要 ICMP/ICMPv6。网站、HY2、VPN 等服务端口请在后续的“nftables 防火墙操作”菜单中明确添加。
+首次 Debian 加固会启用 nftables：默认拒绝所有入站，仅放行 SSH TCP 端口、已建立连接、回环和必要 ICMP/ICMPv6。网站、HY2、VPN 等服务端口请在后续的“nftables 防火墙操作”菜单中明确添加。换 SSH 端口时，当前已建立会话不会中断；但 SSH 重载成功后旧端口会拒绝新连接，必须先另开终端验证新端口。
 
 ### Windows 11 Pro / Enterprise / Education
 
@@ -46,12 +46,12 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.2`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.3`。
 
 ### Debian
 
 ```bash
-version=v1.3.2
+version=v1.3.3
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -62,7 +62,7 @@ sudo bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.2'
+$version = 'v1.3.3'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
@@ -101,7 +101,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 向导会要求粘贴 `.pub` 公钥的一整行，只保留这把 root 公钥并关闭 SSH 密码、键盘交互、转发和隧道功能。它在写入后使用 `sshd -t` 与最终生效配置校验；Fail2ban 配置失败时会恢复本次修改前的配置。
 
-首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口，SSH 校验成功后自动仅保留新端口。
+首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口；SSH 校验并重载成功后自动仅保留新端口。当前已建立的旧 SSH 会话由连接跟踪规则继续放行，但旧端口不能再新建连接；请保持该窗口打开，并另开终端测试新端口成功后再退出。
 
 以后重新运行一键安装器并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
 
@@ -110,7 +110,7 @@ curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/do
   | sudo bash -s -- --firewall
 ```
 
-该命令会下载、校验后临时运行主脚本；不会保留临时文件。菜单支持查看实际规则、更新额外 TCP/UDP 端口，以及恢复为仅 SSH。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
+该命令会下载、校验后临时运行主脚本；不会保留临时文件。菜单支持查看实际规则、更新额外 TCP/UDP 端口、启用并保留端口设置、恢复仅 SSH、停用本脚本管理的防火墙，以及安全重载本脚本规则。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
 
 ```text
 TCP：80,443,51820
@@ -118,6 +118,8 @@ UDP：20000-20199
 ```
 
 上例会放行网站 TCP 80/443、一个 TCP 服务端口，以及 UDP 连续 200 个端口。若 HY2 配置使用 UDP 跳跃端口范围，可在 UDP 项填写例如 `20000-20199`；不要为不需要的协议额外放行端口。云安全组和本机 nftables 都必须放行，服务才能从公网访问。
+
+“停用本脚本管理的防火墙”只会删除本项目的 `inet vps_security_bootstrap` 默认拒绝规则，并移除它的开机加载项；会保留端口设置，方便以后重新启用。它**不会**执行 `systemctl stop nftables`、`systemctl restart nftables` 或 `nft flush ruleset`，因此不会主动停掉或清空 Fail2ban、Docker 和其他应用的规则。停用后，本机入站流量不再由本项目的默认拒绝策略限制；Fail2ban 仍可继续管理自己的封禁规则。
 
 默认不会执行整机 `apt upgrade`，需要你明确确认。SSH 端口切换前会检查 TCP/UDP 监听冲突。
 
