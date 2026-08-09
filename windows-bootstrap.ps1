@@ -1459,7 +1459,7 @@ function Show-WindowsUpdateStatus {
   }
 }
 
-function Set-WindowsAutomaticUpdates {
+function Set-WindowsAutomaticUpdate {
   [CmdletBinding(SupportsShouldProcess)]
   param([Parameter(Mandatory)][bool]$Disable)
 
@@ -1502,7 +1502,7 @@ function Invoke-WindowsUpdateControl {
         if (-not (Read-YesNo -Prompt '确认禁用 Windows 自动更新吗？' -Default N)) { continue }
         $backupPath = Save-SecurityBackup
         try {
-          Set-WindowsAutomaticUpdates -Disable $true
+          Set-WindowsAutomaticUpdate -Disable $true
         } catch {
           Write-TerminatingError "设置 Windows Update 失败。可从管理员控制台运行 $backupPath\restore.ps1 恢复。原始错误：$($_.Exception.Message)"
         }
@@ -1512,7 +1512,7 @@ function Invoke-WindowsUpdateControl {
         if (-not (Read-YesNo -Prompt '确认恢复 Windows 默认更新行为吗？' -Default N)) { continue }
         $backupPath = Save-SecurityBackup
         try {
-          Set-WindowsAutomaticUpdates -Disable $false
+          Set-WindowsAutomaticUpdate -Disable $false
         } catch {
           Write-TerminatingError "恢复 Windows Update 失败。可从管理员控制台运行 $backupPath\restore.ps1 恢复。原始错误：$($_.Exception.Message)"
         }
