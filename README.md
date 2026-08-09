@@ -13,7 +13,13 @@
 
 ### Debian 12 / 13
 
-以 root 登录，或具有 sudo 权限：
+以 root 登录时，直接运行（这是 Bash 形式的一键命令）：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh)
+```
+
+`sudo` 只用于普通用户提权；root 本身已经具备最高权限，因此不应再写 `sudo`。若你使用的是普通 sudo 用户，请改用：
 
 ```bash
 curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh | sudo bash
@@ -31,9 +37,9 @@ irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/
 
 Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行；它们会拒绝错误系统，不会错误地执行另一套系统配置。
 
-## 这不是两个要学的入口
+## 为什么不能用同一条字面命令
 
-底层必须分别使用 Bash 和 PowerShell：Debian 无法原生执行 `.ps1`，Windows 也无法执行 `bash <(...)`。把两种语言硬塞进一个“跨平台脚本”会降低可读性、审计性和兼容性。
+Debian 原生执行 Bash，Windows 原生执行 PowerShell；Debian 无法执行 `.ps1`，Windows 也无法原生执行 `bash <(...)`。因此同一个 URL 可以按系统提供一键入口，但**不能把两种解释器写成同一条可复制命令**。把两种语言硬塞进一个跨平台文件会降低可读性、审计性和兼容性。
 
 因此项目采用两层结构：
 
@@ -42,27 +48,27 @@ Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行
 | Debian 12 / 13 | `install.sh` | 识别 Debian，下载并校验 `bootstrap.sh`，再启动 SSH 向导 |
 | Windows 11 | `install.ps1` | 识别 Windows 11，下载并校验 `windows-bootstrap.ps1`，再启动 RDP 向导 |
 
-你不需要手动下载主脚本；两个安装器只是各自平台的最短、最规范入口。Debian 的短命令会把交互输入自动切回当前 SSH 终端，因此可直接复制执行。
+你不需要手动下载主脚本；两个安装器只是各自平台的一键入口。Debian 的 Bash 命令会保留当前 SSH 终端供菜单交互；Windows 的 PowerShell 命令会先下载、校验主向导再启动。
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.4`。
+对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.5`。
 
 ### Debian
 
 ```bash
-version=v1.3.4
+version=v1.3.5
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
 sha256sum --check install.sh.sha256
-sudo bash install.sh
+bash install.sh
 ```
 
 ### Windows
 
 ```powershell
-$version = 'v1.3.4'
+$version = 'v1.3.5'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
@@ -85,6 +91,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 | 爆破缓解 | Fail2ban + recidive | RDP Guard + 账户短时锁定 |
 | 来源限制 | Fail2ban 可信 IP/CIDR | Windows 防火墙固定 IP/CIDR 白名单 |
 | Telegram | SSH 成功登录、Fail2ban 封禁 | RDP 成功登录、封禁、解封 |
+| 更新控制 | 可选执行一次 `apt upgrade` | 可在菜单中禁用或恢复 Windows 自动更新 |
 | 回滚 | 关键文件备份 | 注册表、防火墙、策略、任务备份和 `restore.ps1` |
 
 所有交互式标题、菜单和输入提示为黄色；成功为绿色、错误为红色。`[Y/n，回车=是]` 与 `[y/N，回车=否]` 会明确显示直接回车的默认动作。
@@ -101,13 +108,34 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 
 向导会要求粘贴 `.pub` 公钥的一整行，只保留这把 root 公钥并关闭 SSH 密码、键盘交互、转发和隧道功能。它在写入后使用 `sshd -t` 与最终生效配置校验；Fail2ban 配置失败时会恢复本次修改前的配置。
 
+### Debian 主菜单与每个选项
+
+运行一键命令后会出现以下菜单；输入 `0` 会直接退出，不修改系统。
+
+| 选项 | 作用 | 你需要注意的事 |
+| --- | --- | --- |
+| `1. 初次部署 / 重新加固 SSH` | 替换 root 的 `authorized_keys` 为本次提供的一把公钥；设置 SSH 端口；关闭密码、键盘交互和所有转发/隧道；配置 Fail2ban、可选 Telegram，并启用本项目管理的 nftables 默认拒绝入站规则。 | 会让旧 root 公钥失效。改端口前先在云安全组放行新端口；保持当前 SSH 会话，另开终端验证新端口。 |
+| `2. 更换 Telegram Bot Token` | 仅更新 Telegram 登录/封禁通知的 Token、Chat ID 和 VPS 名称。 | 不修改 SSH、公钥、端口、Fail2ban 或防火墙。 |
+| `3. nftables 防火墙操作` | 进入防火墙子菜单，单独管理本项目的入站规则。 | 不会改 SSH 公钥或 Fail2ban。网站、HY2、VPN 等端口要在这里明确放行。 |
+
+防火墙子菜单的选项如下：
+
+| 选项 | 作用 |
+| --- | --- |
+| `1. 查看放行端口和实际生效规则` | 显示本项目保存的 TCP/UDP 端口和当前 nftables 规则。 |
+| `2. 设置额外 TCP 放行端口` | 设置网站、TCP 服务等端口；支持 `80,443,51820` 或范围。直接回车清空额外 TCP 端口。 |
+| `3. 设置额外 UDP 放行端口` | 设置 HY2、VPN 等 UDP 端口；支持 `20000-20199`。直接回车清空额外 UDP 端口。 |
+| `4. 启用本脚本管理的防火墙` | 保留已保存的额外端口，并启用默认拒绝入站。 |
+| `5. 恢复为仅放行 SSH 端口` | 清空所有额外 TCP/UDP 端口，仍启用默认拒绝入站，只保留 SSH。 |
+| `6. 停用本脚本管理的防火墙` | 只删除本项目的规则表及启动项；不清空 Docker、Fail2ban 或其他程序的规则。 |
+| `7. 重新加载本脚本管理的防火墙` | 仅校验并重新加载本项目的规则，不重启 nftables 服务。 |
+
 首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口；SSH 校验并重载成功后自动仅保留新端口。当前已建立的旧 SSH 会话由连接跟踪规则继续放行，但旧端口不能再新建连接；请保持该窗口打开，并另开终端测试新端口成功后再退出。
 
 以后重新运行一键安装器并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
 
 ```bash
-curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh \
-  | sudo bash -s -- --firewall
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh) --firewall
 ```
 
 该命令会下载、校验后临时运行主脚本；不会保留临时文件。菜单支持查看实际规则、更新额外 TCP/UDP 端口、启用并保留端口设置、恢复仅 SSH、停用本脚本管理的防火墙，以及安全重载本脚本规则。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
@@ -127,7 +155,7 @@ UDP：20000-20199
 
 ```bash
 curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh \
-  | sudo bash -s -- --keep -- --public-key-file /root/root-login.pub --ssh-port 52022
+  | bash -s -- --keep -- --public-key-file /root/root-login.pub --ssh-port 52022
 ```
 
 ## Windows 11
@@ -137,6 +165,8 @@ curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/do
 默认 RDP Guard 会在同一来源 5 分钟内出现 5 次相关失败时，封禁该来源 1 天；本地账户策略默认连续失败 10 次锁定 15 分钟。固定白名单最可靠；并发或多来源攻击仍可能先造成锁定。
 
 Windows Telegram Token 隐藏输入，配置仅允许 `Administrators` 和 `SYSTEM` 访问。启用前必须成功发送测试消息；API 临时失败不会阻止封禁执行。
+
+Windows 主菜单新增 `4. Windows Update 自动更新控制（适合小磁盘 VPS）`：进入后可以查看状态、禁用自动更新，或恢复默认更新行为。禁用会写入 Windows 的 `NoAutoUpdate=1` 策略，并停止/禁用 `wuauserv` 服务；执行前会创建备份，备份目录中的 `restore.ps1` 可恢复修改前的更新策略和服务启动类型。这个选项能节省小磁盘 VPS 的空间，但会降低安全性；请自行安排手动更新，并定期清理更新缓存或扩容磁盘。
 
 DD Windows 时，可在 [`bin456789/reinstall`](https://github.com/bin456789/reinstall) 的原有命令上加 `--rdp-port 52089`，让第一次启动就避开默认 3389；之后仍可用本项目向导再次更换端口。
 

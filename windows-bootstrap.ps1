@@ -40,7 +40,7 @@
 )]
 [CmdletBinding()]
 param(
-  [ValidateSet('Menu', 'Apply', 'Status', 'Telegram')]
+  [ValidateSet('Menu', 'Apply', 'Status', 'Telegram', 'WindowsUpdate')]
   [string]$Action = 'Menu',
 
   [ValidateRange(1024, 65535)]
@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.4'
+$script:ScriptVersion = 'v1.3.5'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -93,6 +93,8 @@ $script:RdpRegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Serve
 $script:TerminalServerPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
 $script:TerminalServerPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
 $script:RemoteAssistancePath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance'
+$script:WindowsUpdatePolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate'
+$script:WindowsUpdateAuPolicyPath = Join-Path $script:WindowsUpdatePolicyPath 'AU'
 $script:AuditLogonGuid = '{0CCE9215-69AE-11D9-BED3-505054503030}'
 $script:UseColor = -not $env:NO_COLOR -and -not [Console]::IsOutputRedirected
 $script:RdpPortWasProvided = $PSBoundParameters.ContainsKey('RdpPort')
@@ -588,6 +590,13 @@ function Save-SecurityBackup {
   if ($policyExportExitCode -ne 0) {
     New-Item -ItemType File -Path (Join-Path $backupPath 'terminal-server-policy.missing') -Force | Out-Null
   }
+  $windowsUpdatePolicyExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
+    'export', 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate',
+    (Join-Path $backupPath 'windows-update-policy.reg'), '/y'
+  ) -IgnoreExitCode
+  if ($windowsUpdatePolicyExportExitCode -ne 0) {
+    New-Item -ItemType File -Path (Join-Path $backupPath 'windows-update-policy.missing') -Force | Out-Null
+  }
   Invoke-NativeCommand -FilePath 'netsh.exe' -ArgumentList @(
     'advfirewall', 'export', (Join-Path $backupPath 'firewall.wfw')
   ) | Out-Null
@@ -638,6 +647,7 @@ function Save-SecurityBackup {
     $policyValueExists = $true
     $policyValue = [int]$policySettings.UserAuthentication
   }
+  $windowsUpdateService = Get-CimInstance -ClassName Win32_Service -Filter "Name='wuauserv'" -ErrorAction Stop
 
   $metadata = [ordered]@{
     createdAt = (Get-Date).ToString('o')
@@ -646,6 +656,7 @@ function Save-SecurityBackup {
     rdpPort = Get-CurrentRdpPort
     policyUserAuthenticationExists = $policyValueExists
     policyUserAuthenticationValue = $policyValue
+    windowsUpdateServiceStartMode = $windowsUpdateService.StartMode
   }
   $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupPath 'metadata.json') -Encoding UTF8
   Write-RestoreScript -BackupPath $backupPath
@@ -713,6 +724,24 @@ if ([bool]$metadata.policyUserAuthenticationExists) {
     -Path 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
     -Name UserAuthentication `
     -ErrorAction SilentlyContinue
+}
+$windowsUpdatePolicyRegistry = Join-Path $backupPath 'windows-update-policy.reg'
+$windowsUpdatePolicyMissing = Join-Path $backupPath 'windows-update-policy.missing'
+if (Test-Path -LiteralPath $windowsUpdatePolicyRegistry) {
+  Invoke-RestoreNative 'reg.exe' @('import', $windowsUpdatePolicyRegistry)
+} elseif (Test-Path -LiteralPath $windowsUpdatePolicyMissing) {
+  Remove-Item -LiteralPath 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($metadata.PSObject.Properties.Name -contains 'windowsUpdateServiceStartMode') {
+  $windowsUpdateStartType = switch ([string]$metadata.windowsUpdateServiceStartMode) {
+    'Auto' { 'auto' }
+    'Manual' { 'demand' }
+    'Disabled' { 'disabled' }
+    default { $null }
+  }
+  if ($windowsUpdateStartType) {
+    Invoke-RestoreNative 'sc.exe' @('config', 'wuauserv', 'start=', $windowsUpdateStartType)
+  }
 }
 Invoke-RestoreNative 'netsh.exe' @('advfirewall', 'import', (Join-Path $backupPath 'firewall.wfw'))
 Invoke-RestoreNative 'secedit.exe' @(
@@ -1403,6 +1432,98 @@ function Set-TemporaryAccountLockoutPolicy {
   Write-Success '连续失败 10 次后锁定 15 分钟，并在 15 分钟后重置失败计数'
 }
 
+function Get-WindowsUpdateStatus {
+  $policy = Get-ItemProperty -Path $script:WindowsUpdateAuPolicyPath -ErrorAction SilentlyContinue
+  $noAutoUpdate = $null
+  if ($policy -and $policy.PSObject.Properties.Name -contains 'NoAutoUpdate') {
+    $noAutoUpdate = [int]$policy.NoAutoUpdate
+  }
+  $service = Get-CimInstance -ClassName Win32_Service -Filter "Name='wuauserv'" -ErrorAction Stop
+
+  return [pscustomobject]@{
+    PolicyDisablesAutomaticUpdates = ($noAutoUpdate -eq 1)
+    PolicyValue = $noAutoUpdate
+    ServiceStartMode = $service.StartMode
+    ServiceState = $service.State
+  }
+}
+
+function Show-WindowsUpdateStatus {
+  Assert-SupportedWindows
+  $status = Get-WindowsUpdateStatus
+  Write-Title 'Windows Update 状态'
+  Write-Output "自动更新策略：$(if ($status.PolicyDisablesAutomaticUpdates) { '已由本脚本禁用（NoAutoUpdate=1）' } else { '未由本脚本禁用' })"
+  Write-Output "Windows Update 服务：启动类型 $($status.ServiceStartMode)，当前状态 $($status.ServiceState)"
+  if ($status.PolicyDisablesAutomaticUpdates) {
+    Write-WarningLine '安全更新将不再自动下载或安装。请自行安排手动更新，并保留足够磁盘空间。'
+  }
+}
+
+function Set-WindowsAutomaticUpdates {
+  [CmdletBinding(SupportsShouldProcess)]
+  param([Parameter(Mandatory)][bool]$Disable)
+
+  if ($Disable) {
+    if (-not $PSCmdlet.ShouldProcess('Windows Update 自动更新策略和 wuauserv 服务', '禁用自动更新并停止当前服务')) { return }
+    New-Item -Path $script:WindowsUpdateAuPolicyPath -Force | Out-Null
+    New-ItemProperty `
+      -Path $script:WindowsUpdateAuPolicyPath `
+      -Name NoAutoUpdate `
+      -PropertyType DWord `
+      -Value 1 `
+      -Force | Out-Null
+    Stop-Service -Name wuauserv -Force -ErrorAction SilentlyContinue
+    Set-Service -Name wuauserv -StartupType Disabled -ErrorAction Stop
+    Write-Success '已禁用 Windows 自动更新，并停止 Windows Update 服务'
+    return
+  }
+
+  if (-not $PSCmdlet.ShouldProcess('Windows Update 自动更新策略和 wuauserv 服务', '恢复 Windows 默认的按需启动和自动更新行为')) { return }
+  Remove-ItemProperty `
+    -Path $script:WindowsUpdateAuPolicyPath `
+    -Name NoAutoUpdate `
+    -ErrorAction SilentlyContinue
+  Set-Service -Name wuauserv -StartupType Manual -ErrorAction Stop
+  Write-Success '已移除本脚本的自动更新禁用策略，并将 Windows Update 服务恢复为按需启动'
+}
+
+function Invoke-WindowsUpdateControl {
+  Assert-SupportedWindows
+  while ($true) {
+    Show-WindowsUpdateStatus
+    Write-Output ''
+    Write-ColorLine -Text '  1. 禁用 Windows 自动更新（策略 + 停止并禁用 Windows Update 服务）' -Color Yellow
+    Write-ColorLine -Text '  2. 恢复 Windows 默认更新行为（移除策略 + 按需启动服务）' -Color Yellow
+    Write-ColorLine -Text '  0. 返回主菜单' -Color Yellow
+    $choice = Read-Default -Prompt '请选择操作' -Default '0'
+    switch ($choice) {
+      '1' {
+        Write-WarningLine '禁用更新会降低系统安全性；此选项适用于磁盘空间极小且由你自行安排更新维护的 VPS。'
+        if (-not (Read-YesNo -Prompt '确认禁用 Windows 自动更新吗？' -Default N)) { continue }
+        $backupPath = Save-SecurityBackup
+        try {
+          Set-WindowsAutomaticUpdates -Disable $true
+        } catch {
+          Write-TerminatingError "设置 Windows Update 失败。可从管理员控制台运行 $backupPath\restore.ps1 恢复。原始错误：$($_.Exception.Message)"
+        }
+        Write-Info "备份与恢复脚本：$backupPath\restore.ps1"
+      }
+      '2' {
+        if (-not (Read-YesNo -Prompt '确认恢复 Windows 默认更新行为吗？' -Default N)) { continue }
+        $backupPath = Save-SecurityBackup
+        try {
+          Set-WindowsAutomaticUpdates -Disable $false
+        } catch {
+          Write-TerminatingError "恢复 Windows Update 失败。可从管理员控制台运行 $backupPath\restore.ps1 恢复。原始错误：$($_.Exception.Message)"
+        }
+        Write-Info "备份与恢复脚本：$backupPath\restore.ps1"
+      }
+      '0' { return }
+      default { Write-ColorLine -Text '无效选项。' -Color Red }
+    }
+  }
+}
+
 function Show-SecurityStatus {
   Assert-SupportedWindows
   $currentVersion = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -1423,6 +1544,8 @@ function Show-SecurityStatus {
   Write-Output "NLA：$(if ($nla -eq 1) { '已要求' } else { '未要求' })"
   Write-Output "RDP Guard：$(if ($guardTask) { $guardTask.State } else { '未安装' })"
   Write-Output "Telegram：$(if ($telegramConfigured -and $telegramTask) { "已配置（任务 $($telegramTask.State)）" } else { '未启用' })"
+  $windowsUpdateStatus = Get-WindowsUpdateStatus
+  Write-Output "Windows 自动更新：$(if ($windowsUpdateStatus.PolicyDisablesAutomaticUpdates) { '已禁用' } else { '未由本脚本禁用' })"
   Write-Output ''
   Write-Output '防火墙配置：'
   $profiles | Format-Table -AutoSize
@@ -1624,6 +1747,7 @@ function Show-MainMenu {
   Write-ColorLine -Text '  1. 应用或更新 Windows 11 RDP 安全防护' -Color Yellow
   Write-ColorLine -Text '  2. 查看当前 Windows 11 安全状态' -Color Yellow
   Write-ColorLine -Text '  3. 更换 Telegram Bot Token 或通知目标' -Color Yellow
+  Write-ColorLine -Text '  4. Windows Update 自动更新控制（适合小磁盘 VPS）' -Color Yellow
   Write-ColorLine -Text '  0. 退出' -Color Yellow
   return Read-Default -Prompt '请选择操作' -Default '1'
 }
@@ -1636,6 +1760,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         '1' { $Action = 'Apply' }
         '2' { $Action = 'Status' }
         '3' { $Action = 'Telegram' }
+        '4' { $Action = 'WindowsUpdate' }
         '0' { Write-Info '已退出，系统未被修改。'; exit 0 }
         default { Write-TerminatingError '无效选项。' }
       }
@@ -1645,6 +1770,7 @@ if ($MyInvocation.InvocationName -ne '.') {
       'Apply' { Invoke-Apply }
       'Status' { Show-SecurityStatus }
       'Telegram' { Invoke-TelegramConfiguration }
+      'WindowsUpdate' { Invoke-WindowsUpdateControl }
     }
   } catch {
     Write-ColorLine -Text "错误：$($_.Exception.Message)" -Color Red
