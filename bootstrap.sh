@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.5'
+readonly SCRIPT_VERSION='v1.3.6'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -553,6 +553,23 @@ EOF
   normalize_port_specs "$updated" || die '端口格式无效；请使用 1-65535 的端口或端口范围。'
 }
 
+append_firewall_ports() {
+  local protocol=$1 current=$2 added combined
+  # Like prompt_firewall_ports, keep all human-facing text on stderr because
+  # callers capture only the normalized port specification from stdout.
+  prompt_block >&2 <<EOF
+追加 ${protocol} 端口会保留当前端口，并自动去重/合并相邻范围。
+示例：当前为 ${current:-无}，输入 51820,20000-20199 后会一并保留。
+直接回车 = 取消追加，不修改当前 ${protocol} 端口。
+EOF
+  if ! read -r -p "${STYLE_PROMPT}要追加的 ${protocol} 端口 [当前：${current:-无}]：${STYLE_RESET}" added; then
+    die '未读取到端口输入，操作已取消。'
+  fi
+  [ -n "$added" ] || return 1
+  combined=${current:+$current,}$added
+  normalize_port_specs "$combined" || die '端口格式无效；请使用 1-65535 的端口或端口范围。'
+}
+
 firewall_menu() {
   local choice current_tcp current_udp new_ports ssh_port
   [ -t 0 ] || die 'nftables 防火墙菜单需要交互式终端。'
@@ -571,8 +588,10 @@ firewall_menu() {
     menu_option 5 '恢复为仅放行 SSH 端口' '清空所有额外 TCP/UDP 端口，并开启默认拒绝入站'
     menu_option 6 '停用本脚本管理的防火墙' '仅移除本脚本的默认拒绝规则；不停止 nftables 服务或修改其他规则'
     menu_option 7 '重新加载本脚本管理的防火墙' '仅校验并重载本脚本的规则表；不重启 nftables 服务'
+    menu_option 8 '追加额外 TCP 放行端口' '保留当前 TCP 端口，并追加新端口/范围'
+    menu_option 9 '追加额外 UDP 放行端口' '保留当前 UDP 端口，并追加新端口/范围'
     menu_option 0 '返回主菜单'
-    if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/5/6/7/0，无默认值]：${STYLE_RESET}" choice; then
+    if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/5/6/7/8/9/0，无默认值]：${STYLE_RESET}" choice; then
       die '未读取到菜单选项，操作已取消。'
     fi
     ssh_port=$(detect_current_ssh_port)
@@ -610,8 +629,20 @@ firewall_menu() {
         reload_managed_firewall || die '重新加载本脚本管理的防火墙失败；请查看状态和实际规则。'
         success '本脚本管理的防火墙规则已重新加载。'
         ;;
+      8)
+        new_ports=$(append_firewall_ports TCP "$current_tcp") || continue
+        ask_yes_no "确认追加 TCP 端口后为：$new_ports？" n || continue
+        apply_firewall_policy "$ssh_port" "$new_ports" "$current_udp" || die '追加 nftables TCP 规则失败；已尝试恢复原有配置。'
+        success 'nftables TCP 放行端口已追加。'
+        ;;
+      9)
+        new_ports=$(append_firewall_ports UDP "$current_udp") || continue
+        ask_yes_no "确认追加 UDP 端口后为：$new_ports？" n || continue
+        apply_firewall_policy "$ssh_port" "$current_tcp" "$new_ports" || die '追加 nftables UDP 规则失败；已尝试恢复原有配置。'
+        success 'nftables UDP 放行端口已追加。'
+        ;;
       0) return 0 ;;
-      *) printf '%b请输入 1、2、3、4、5、6、7 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
+      *) printf '%b请输入 1 到 9，或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
     esac
   done
 }
