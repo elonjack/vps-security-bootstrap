@@ -3,66 +3,135 @@
 [![Lint](https://github.com/elonjack/vps-security-bootstrap/actions/workflows/lint.yml/badge.svg)](https://github.com/elonjack/vps-security-bootstrap/actions/workflows/lint.yml)
 [![Latest release](https://img.shields.io/github/v/release/elonjack/vps-security-bootstrap?display_name=tag)](https://github.com/elonjack/vps-security-bootstrap/releases/latest)
 
-为 Debian 12/13 和 Windows 11 VPS 提供原生安全初始化向导。项目保留各系统最合适的脚本语言，但你只需要在自己的系统运行一条短安装命令。
+适用于 Debian 12/13 与 Windows 11 VPS 的交互式安全初始化工具。两种系统使用各自原生的解释器：Debian 用 Bash，Windows 用 PowerShell；运行后只会显示当前系统能执行的菜单。
 
-> 这是安全初始化工具，不是安全保证。改端口只减少扫描噪声；云厂商安全组、强凭据、及时更新和可验证的恢复路径仍不可替代。
+> 这不是安全保证。修改端口只能减少扫描噪声；云厂商安全组、强凭据、定期维护和保留可访问的控制台同样重要。
 
-## 快速开始
-
-安装器会下载**固定版本**的主脚本与 SHA-256 文件，校验通过后才启动安全向导。下列短命令本身通过 GitHub HTTPS 获取当前稳定版安装器；高价值 VPS 请使用后面的“固定版本完整校验”。
+## 一键运行
 
 ### Debian 12 / 13
 
-以 root 登录，或具有 sudo 权限：
+以 **root** 登录时运行：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh)
+```
+
+若使用普通 sudo 用户，运行：
 
 ```bash
 curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh | sudo bash
 ```
 
-首次 Debian 加固会启用 nftables：默认拒绝所有入站，仅放行 SSH TCP 端口、已建立连接、回环和必要 ICMP/ICMPv6。网站、HY2、VPN 等服务端口请在后续的“nftables 防火墙操作”菜单中明确添加。换 SSH 端口时，当前已建立会话不会中断；但 SSH 重载成功后旧端口会拒绝新连接，必须先另开终端验证新端口。
-
 ### Windows 11 Pro / Enterprise / Education
 
-以“管理员身份”打开 Windows PowerShell：
+用“管理员身份”打开 Windows PowerShell 后运行：
 
 ```powershell
 irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1 | iex
 ```
 
-Windows 入口只在 Windows 11 运行，Debian 入口只在 Debian 12/13 运行；它们会拒绝错误系统，不会错误地执行另一套系统配置。
+安装器会下载固定版本的主脚本和 SHA-256 文件，校验通过后才启动向导。Debian 安装器只接受 Debian 12/13；Windows 安装器只接受 Windows 11。
 
-## 这不是两个要学的入口
+## 开始前必须做的事
 
-底层必须分别使用 Bash 和 PowerShell：Debian 无法原生执行 `.ps1`，Windows 也无法执行 `bash <(...)`。把两种语言硬塞进一个“跨平台脚本”会降低可读性、审计性和兼容性。
+1. 改 SSH 或 RDP 端口前，先在 VPS 厂商安全组/云防火墙放行新端口。
+2. 修改远程端口后，不要立即关闭当前 SSH/RDP 会话；另开窗口确认新端口可连接。
+3. 固定公网管理 IP 时，优先使用来源白名单；它比改端口更有效。
 
-因此项目采用两层结构：
+## Debian 菜单说明
 
-| 你在什么系统 | 你运行什么 | 安装器做什么 |
+启动后输入相应数字；`0` 始终表示退出且不修改系统。
+
+| 主菜单 | 会做什么 | 不会做什么 / 注意事项 |
 | --- | --- | --- |
-| Debian 12 / 13 | `install.sh` | 识别 Debian，下载并校验 `bootstrap.sh`，再启动 SSH 向导 |
-| Windows 11 | `install.ps1` | 识别 Windows 11，下载并校验 `windows-bootstrap.ps1`，再启动 RDP 向导 |
+| `1. 初次部署 / 重新加固 SSH` | 替换 root 的 SSH 公钥、设置 SSH 端口、关闭密码和键盘交互登录、关闭转发/隧道、配置 Fail2ban，并启用本项目管理的 nftables 防火墙。 | 旧 root 公钥会失效；改端口前先放行云安全组，保留当前 SSH 会话。 |
+| `2. 更换 Telegram Bot Token` | 更新 Telegram Token、Chat ID 和 VPS 名称；用于 SSH 登录成功和 Fail2ban 封禁通知。 | 不会修改 SSH、公钥、端口、Fail2ban 策略或防火墙。 |
+| `3. nftables 防火墙操作` | 进入防火墙子菜单，管理本项目的入站放行端口。 | 不会修改 SSH 公钥或 Fail2ban。网站、HY2、VPN 等端口必须在这里明确放行。 |
+| `0. 退出` | 不做任何修改。 | — |
 
-你不需要手动下载主脚本；两个安装器只是各自平台的最短、最规范入口。Debian 的短命令会把交互输入自动切回当前 SSH 终端，因此可直接复制执行。
+选择 `1` 后，向导会依次询问以下内容；所有修改会在最后确认后才执行。
+
+| 项目 | 作用 |
+| --- | --- |
+| root SSH 公钥 | 粘贴 `.pub` 文件的一整行；只保留这把公钥。绝不能粘贴私钥。 |
+| SSH 端口 | 直接回车保留当前端口；改端口时脚本暂时放行新旧端口，SSH 重载成功后旧端口不再接受新连接。 |
+| Fail2ban 白名单 | 可填可信 IP/CIDR；正常使用私钥登录不需要加白名单。 |
+| `apt upgrade` | 默认不执行；确认后才安装系统可用更新。安装脚本依赖仍会执行 `apt update`。 |
+| Telegram 通知 | 可选；Token 隐藏输入，配置成功后通知 SSH 登录与封禁事件。 |
+
+### Debian 防火墙子菜单
+
+| 子菜单 | 作用 |
+| --- | --- |
+| `1. 查看放行端口和实际生效规则` | 查看本项目保存的 TCP/UDP 端口和当前 nftables 规则。 |
+| `2. 设置额外 TCP 放行端口` | 放行网站或 TCP 服务，例如 `80,443,51820`；直接回车清空额外 TCP 端口。 |
+| `3. 设置额外 UDP 放行端口` | 放行 HY2/VPN 等 UDP 服务，例如 `20000-20199`；直接回车清空额外 UDP 端口。 |
+| `4. 启用本脚本管理的防火墙` | 保留当前额外端口，启用“默认拒绝入站”。 |
+| `5. 恢复为仅放行 SSH 端口` | 清空额外 TCP/UDP 端口，只保留 SSH。 |
+| `6. 停用本脚本管理的防火墙` | 删除本项目的规则表和启动项；不会停止 nftables 服务，不会清空 Docker、Fail2ban 或其他程序的规则。 |
+| `7. 重新加载本脚本管理的防火墙` | 只校验并重载本项目规则，不重启 nftables 服务。 |
+| `0. 返回主菜单` | 不修改防火墙。 |
+
+要直接进入防火墙菜单：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh) --firewall
+```
+
+## Windows 11 菜单说明
+
+以管理员身份运行后，输入相应数字；`0` 表示退出且不修改系统。
+
+| 主菜单 | 会做什么 | 你需要注意的事 |
+| --- | --- | --- |
+| `1. 应用或更新 Windows 11 RDP 安全防护` | 配置 RDP、Windows 防火墙、可选来源白名单、RDP Guard、账户锁定策略和 Telegram。 | 修改前会备份注册表、防火墙、策略和计划任务；RDP 端口要在重启后完全生效。 |
+| `2. 查看当前 Windows 11 安全状态` | 显示 RDP 端口、NLA、防火墙、RDP Guard、Telegram 与自动更新状态。 | 只读，不修改系统。 |
+| `3. 更换 Telegram Bot Token 或通知目标` | 更新 RDP 登录、封禁、解封通知的 Token、Chat ID 与 VPS 名称。 | 不修改 RDP、端口、防火墙或账户策略。 |
+| `4. Windows Update 自动更新控制` | 查看、禁用或恢复 Windows 自动更新。 | 适合磁盘很小的 VPS；禁用更新会降低安全性，应自行安排手动更新。 |
+| `0. 退出` | 不做任何修改。 | — |
+
+选择 `1` 后，各项配置的作用如下：
+
+| 项目 | 作用 |
+| --- | --- |
+| RDP 端口 | 可改为 1024–65535 的未占用端口。重启前旧端口临时放行，重启后自动移除旧规则。 |
+| 来源白名单 | 填固定公网 IP/CIDR 后，只有这些来源能访问 RDP；动态 IP 请选 `Any`。 |
+| NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。 |
+| Windows 防火墙 | 启用全部配置文件并默认拒绝入站，只允许配置的 RDP TCP/UDP 端口和来源。 |
+| RDP Guard | 可选。默认同一来源 5 分钟内失败 5 次，封禁 1 天。 |
+| 账户锁定策略 | 可选。默认连续失败 10 次锁定 15 分钟。 |
+| Telegram | 可选；Token 仅允许 `Administrators` 和 `SYSTEM` 访问，启用前必须成功发送测试消息。 |
+
+选择 `4` 后的子菜单：
+
+| 子菜单 | 作用 |
+| --- | --- |
+| `1. 禁用 Windows 自动更新` | 写入 `NoAutoUpdate=1` 策略，停止并禁用 `wuauserv` 服务；执行前创建可恢复备份。 |
+| `2. 恢复 Windows 默认更新行为` | 移除本脚本写入的策略，并将 Windows Update 服务改回按需启动。 |
+| `0. 返回主菜单` | 不修改更新配置。 |
+
+Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需要恢复时，在管理员 PowerShell 中运行该目录的 `restore.ps1`。
 
 ## 固定版本完整校验
 
-对生产或高价值 VPS，建议先校验**安装器本身**，再执行。示例固定使用当前 `v1.3.4`。
+高价值 VPS 建议先校验安装器本身。当前版本为 `v1.3.5`。
 
 ### Debian
 
 ```bash
-version=v1.3.4
+version=v1.3.5
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
 sha256sum --check install.sh.sha256
-sudo bash install.sh
+bash install.sh
 ```
 
 ### Windows
 
 ```powershell
-$version = 'v1.3.4'
+$version = 'v1.3.5'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
@@ -72,101 +141,14 @@ if ($actual -ne $expected) { throw 'SHA-256 校验失败，禁止运行。' }
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
-安装器还会再次校验主脚本。Release 使用不可变保护：已发布的 tag 和附件不能被替换；但“latest”仍会在未来指向新版本，因此固定版本更适合需要变更控制的服务器。
+每个正式 Release 都附带 `install.sh`、`bootstrap.sh`、`install.ps1`、`windows-bootstrap.ps1` 及其 SHA-256 文件。
 
-## 功能概览
+## 验证远程连接
 
-| 能力 | Debian 12 / 13 | Windows 11 |
-| --- | --- | --- |
-| 远程入口 | root SSH 公钥登录 | RDP |
-| 端口 | 可设置 SSH 端口 | 可重复修改 RDP 端口 |
-| 凭据防护 | 禁用密码与键盘交互认证 | NLA、TLS、高加密 |
-| 主机防火墙 | nftables 默认拒绝入站；SSH 与明确配置的 TCP/UDP 端口 | Windows 防火墙固定 IP/CIDR 白名单 |
-| 爆破缓解 | Fail2ban + recidive | RDP Guard + 账户短时锁定 |
-| 来源限制 | Fail2ban 可信 IP/CIDR | Windows 防火墙固定 IP/CIDR 白名单 |
-| Telegram | SSH 成功登录、Fail2ban 封禁 | RDP 成功登录、封禁、解封 |
-| 回滚 | 关键文件备份 | 注册表、防火墙、策略、任务备份和 `restore.ps1` |
-
-所有交互式标题、菜单和输入提示为黄色；成功为绿色、错误为红色。`[Y/n，回车=是]` 与 `[y/N，回车=否]` 会明确显示直接回车的默认动作。
-
-## 使用前必读
-
-1. 改 SSH/RDP 端口前，先在 VPS 厂商安全组或云防火墙放行新端口。Debian 还需要在本脚本的 nftables 菜单放行该端口。
-2. 新连接验证成功前，保持当前 SSH/RDP 会话或厂商控制台打开。
-3. 固定公网管理 IP 时，优先配置来源白名单；这比改端口更有效。
-4. Telegram 是告警，不是阻止私钥泄露或账户接管的防线。
-5. Debian 模式只保留 root 公钥登录。私钥一旦泄露即代表最高权限，请使用专用、强口令保护的私钥。
-
-## Debian 12 / 13
-
-向导会要求粘贴 `.pub` 公钥的一整行，只保留这把 root 公钥并关闭 SSH 密码、键盘交互、转发和隧道功能。它在写入后使用 `sshd -t` 与最终生效配置校验；Fail2ban 配置失败时会恢复本次修改前的配置。
-
-首次部署会启用脚本专用的 `inet vps_security_bootstrap` nftables 表，默认拒绝入站；它不会执行 `nft flush ruleset`，因此不会清空 Fail2ban、Docker 或其他应用自己的规则表。初次仅放行 SSH TCP 端口。改 SSH 端口时会短暂同时放行旧/新端口；SSH 校验并重载成功后自动仅保留新端口。当前已建立的旧 SSH 会话由连接跟踪规则继续放行，但旧端口不能再新建连接；请保持该窗口打开，并另开终端测试新端口成功后再退出。
-
-以后重新运行一键安装器并选择主菜单 `3. nftables 防火墙操作`，或直接执行以下命令，即可管理端口：
-
-```bash
-curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh \
-  | sudo bash -s -- --firewall
-```
-
-该命令会下载、校验后临时运行主脚本；不会保留临时文件。菜单支持查看实际规则、更新额外 TCP/UDP 端口、启用并保留端口设置、恢复仅 SSH、停用本脚本管理的防火墙，以及安全重载本脚本规则。端口可使用单端口、连续范围、逗号组合；直接回车表示该协议不额外放行端口：
-
-```text
-TCP：80,443,51820
-UDP：20000-20199
-```
-
-上例会放行网站 TCP 80/443、一个 TCP 服务端口，以及 UDP 连续 200 个端口。若 HY2 配置使用 UDP 跳跃端口范围，可在 UDP 项填写例如 `20000-20199`；不要为不需要的协议额外放行端口。云安全组和本机 nftables 都必须放行，服务才能从公网访问。
-
-“停用本脚本管理的防火墙”只会删除本项目的 `inet vps_security_bootstrap` 默认拒绝规则，并移除它的开机加载项；会保留端口设置，方便以后重新启用。它**不会**执行 `systemctl stop nftables`、`systemctl restart nftables` 或 `nft flush ruleset`，因此不会主动停掉或清空 Fail2ban、Docker 和其他应用的规则。停用后，本机入站流量不再由本项目的默认拒绝策略限制；Fail2ban 仍可继续管理自己的封禁规则。
-
-默认不会执行整机 `apt upgrade`，需要你明确确认。SSH 端口切换前会检查 TCP/UDP 监听冲突。
-
-自动化时可保留安装器下载文件并传递主脚本参数：
-
-```bash
-curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh \
-  | sudo bash -s -- --keep -- --public-key-file /root/root-login.pub --ssh-port 52022
-```
-
-## Windows 11
-
-每次重新运行 Windows 向导都可以改 RDP 端口。改端口时，旧端口仅在重启前临时放行；一次性开机任务会在下次启动后自动删除旧规则，RDP Guard 在重启前同时保护新旧端口。
-
-默认 RDP Guard 会在同一来源 5 分钟内出现 5 次相关失败时，封禁该来源 1 天；本地账户策略默认连续失败 10 次锁定 15 分钟。固定白名单最可靠；并发或多来源攻击仍可能先造成锁定。
-
-Windows Telegram Token 隐藏输入，配置仅允许 `Administrators` 和 `SYSTEM` 访问。启用前必须成功发送测试消息；API 临时失败不会阻止封禁执行。
-
-DD Windows 时，可在 [`bin456789/reinstall`](https://github.com/bin456789/reinstall) 的原有命令上加 `--rdp-port 52089`，让第一次启动就避开默认 3389；之后仍可用本项目向导再次更换端口。
-
-## Telegram
-
-先在 Telegram 创建 Bot，打开机器人并发送任意消息，再从 `getUpdates` 返回的 `message.chat.id` 获取数字 Chat ID。通知包含主机名、VPS 名称、来源 IP 和时间，请仅发送到可信聊天。
-
-发现未知 root SSH 或 RDP 登录成功通知时，应按凭据泄露或主机失陷处理：保留访问路径、轮换密钥/密码、检查日志；无法确认影响范围时从可信镜像重建 VPS。
-
-## 验证与回滚
-
-Debian 完成后另开终端验证：
+Debian 完成后另开终端测试：
 
 ```bash
 ssh -i ~/.ssh/id_ed25519 -p 你的端口 root@服务器IP
 ```
 
-Windows 的备份位于 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需要回滚时从管理员会话执行其中的 `restore.ps1`。该恢复脚本会整体恢复备份时的 Windows 防火墙状态，因此只应使用紧邻本次修改的备份。
-
-## Release 附件
-
-每个正式 Release 提供：
-
-- `install.sh` 与 `install.sh.sha256`
-- `bootstrap.sh` 与 `bootstrap.sh.sha256`
-- `install.ps1` 与 `install.ps1.sha256`
-- `windows-bootstrap.ps1` 与 `windows-bootstrap.ps1.sha256`
-
-## 开发与检查
-
-GitHub Actions 检查 Bash 语法、ShellCheck、PowerShell 5.1 AST、PSScriptAnalyzer、内嵌 Windows 任务脚本、编码、版本一致性及 Git 空白错误。
-
-策略依据：[Microsoft：更改 RDP 端口](https://learn.microsoft.com/en-us/windows-server/remote/remote-desktop-services/remotepc/change-listening-port)、[NLA](https://learn.microsoft.com/en-in/windows-server/remote/remote-desktop-services/remotepc/remote-desktop-allow-access)、[成功登录事件 4624](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4624)、[失败登录事件 4625](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-4625)、[Telegram Bot API](https://core.telegram.org/bots/api#sendmessage)。
+Windows 重启后用 `mstsc` 连接 `服务器IP:你的RDP端口`。成功连接前，请保留当前 RDP 会话或厂商控制台。

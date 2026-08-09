@@ -7,17 +7,6 @@
   irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1 | iex
 #>
 
-[CmdletBinding()]
-param(
-  [ValidatePattern('^v[0-9]+\.[0-9]+\.[0-9]+$')]
-  [string]$Version = 'v1.3.4',
-
-  [switch]$Keep,
-
-  [Parameter(ValueFromRemainingArguments)]
-  [string[]]$BootstrapArguments
-)
-
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -33,14 +22,15 @@ if ([int]$currentVersion.CurrentBuildNumber -lt 22000) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'elonjack/vps-security-bootstrap'
-$workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$Version-$([guid]::NewGuid().ToString('N'))"
-$baseUrl = "https://github.com/$repository/releases/download/$Version"
+$releaseVersion = 'v1.3.5'
+$workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$releaseVersion-$([guid]::NewGuid().ToString('N'))"
+$baseUrl = "https://github.com/$repository/releases/download/$releaseVersion"
 $scriptPath = Join-Path $workDirectory 'windows-bootstrap.ps1'
 $checksumPath = Join-Path $workDirectory 'windows-bootstrap.ps1.sha256'
 
 try {
   New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
-  Write-Output "正在下载并校验 $Version..."
+  Write-Output "正在下载并校验 $releaseVersion..."
   Invoke-WebRequest -Uri "$baseUrl/windows-bootstrap.ps1" -OutFile $scriptPath -UseBasicParsing
   Invoke-WebRequest -Uri "$baseUrl/windows-bootstrap.ps1.sha256" -OutFile $checksumPath -UseBasicParsing
 
@@ -60,12 +50,12 @@ try {
   }
 
   Write-Output 'SHA-256 校验成功，正在启动 Windows 安全向导。'
-  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath @BootstrapArguments
+  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
   if ($LASTEXITCODE -ne 0) {
     throw "Windows 安全向导失败，退出码：$LASTEXITCODE"
   }
 } finally {
-  if (-not $Keep -and (Test-Path -LiteralPath $workDirectory)) {
+  if (Test-Path -LiteralPath $workDirectory) {
     Remove-Item -LiteralPath $workDirectory -Recurse -Force
   }
 }
