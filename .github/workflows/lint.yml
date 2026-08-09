@@ -1,6 +1,7 @@
 name: Lint
 
 on:
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -102,6 +103,14 @@ jobs:
           ) | Out-Null
           if ($installerErrors.Count) { throw ($installerErrors | ForEach-Object Message | Out-String) }
 
+          $installerDefinition = Get-Content -LiteralPath $installerPath -Raw -Encoding UTF8
+          if ($installerDefinition -match '(?m)^\s*param\s*\(') {
+            throw 'install.ps1 must not use a script-level param block: its quick command executes it with Invoke-Expression.'
+          }
+          if ($installerDefinition -match '(?m)^\s*\[CmdletBinding\(\)\]') {
+            throw 'install.ps1 must not use script-level CmdletBinding: Invoke-Expression cannot run it safely.'
+          }
+
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
           . $path
           foreach ($source in @(
@@ -153,6 +162,16 @@ jobs:
           }
           if ((Get-RdpPortCleanupSource) -notmatch 'VpsSecurity-RdpAllow-Current-\*') {
             throw 'The one-time old-port cleanup rule is missing.'
+          }
+          if ((Get-Command Set-WindowsAutomaticUpdate -ErrorAction SilentlyContinue) -eq $null) {
+            throw 'Windows Update control function is missing.'
+          }
+          Set-WindowsAutomaticUpdate -Disable $true -WhatIf
+          if ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -notmatch 'NoAutoUpdate') {
+            throw 'Windows Update control must set the NoAutoUpdate policy.'
+          }
+          if ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -notmatch 'WindowsUpdate') {
+            throw 'Windows Update menu action is missing.'
           }
 
           $versionMatch = Select-String -Path $path -Pattern "ScriptVersion = '(v[^']+)'"
