@@ -47,6 +47,9 @@ jobs:
           grep -F 'nft delete table inet "$FIREWALL_TABLE"' bootstrap.sh
           grep -F '停用本脚本管理的防火墙' bootstrap.sh
           grep -F '重新加载本脚本管理的防火墙' bootstrap.sh
+          grep -F '追加额外 TCP 放行端口' bootstrap.sh
+          grep -F 'append_firewall_ports' bootstrap.sh
+          grep -F '追加额外 TCP 放行端口' README.md
           grep -F 'prompt_block >&2 <<EOF' bootstrap.sh
           ! grep -F 'systemctl stop nftables' bootstrap.sh
           ! grep -F 'systemctl restart nftables' bootstrap.sh
