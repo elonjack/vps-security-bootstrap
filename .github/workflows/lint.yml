@@ -107,18 +107,8 @@ jobs:
           if ($installerDefinition -match '(?m)^\s*param\s*\(') {
             throw 'install.ps1 must not use a script-level param block: its quick command executes it with Invoke-Expression.'
           }
-          function Invoke-WebRequest { throw '__installer_execution_reached__' }
-          try {
-            Invoke-Expression $installerDefinition
-          } catch {
-            if ($_.Exception -is [Management.Automation.ParseException]) {
-              throw "install.ps1 does not work with Invoke-Expression: $($_.Exception.Message)"
-            }
-            if ($_.Exception.Message -notmatch '__installer_execution_reached__|仅支持 Windows 11') {
-              throw
-            }
-          } finally {
-            Remove-Item -Path Function:\Invoke-WebRequest -Force -ErrorAction SilentlyContinue
+          if ($installerDefinition -match '(?m)^\s*\[CmdletBinding\(\)\]') {
+            throw 'install.ps1 must not use script-level CmdletBinding: Invoke-Expression cannot run it safely.'
           }
 
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
