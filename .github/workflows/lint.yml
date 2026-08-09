@@ -163,10 +163,10 @@ jobs:
           if ((Get-RdpPortCleanupSource) -notmatch 'VpsSecurity-RdpAllow-Current-\*') {
             throw 'The one-time old-port cleanup rule is missing.'
           }
-          if ((Get-Command Set-WindowsAutomaticUpdates -ErrorAction SilentlyContinue) -eq $null) {
+          if ((Get-Command Set-WindowsAutomaticUpdate -ErrorAction SilentlyContinue) -eq $null) {
             throw 'Windows Update control function is missing.'
           }
-          Set-WindowsAutomaticUpdates -Disable $true -WhatIf
+          Set-WindowsAutomaticUpdate -Disable $true -WhatIf
           if ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -notmatch 'NoAutoUpdate') {
             throw 'Windows Update control must set the NoAutoUpdate policy.'
           }
