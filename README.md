@@ -65,13 +65,17 @@ irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/
 | 子菜单 | 作用 |
 | --- | --- |
 | `1. 查看放行端口和实际生效规则` | 查看本项目保存的 TCP/UDP 端口和当前 nftables 规则。 |
-| `2. 设置额外 TCP 放行端口` | 放行网站或 TCP 服务，例如 `80,443,51820`；直接回车清空额外 TCP 端口。 |
-| `3. 设置额外 UDP 放行端口` | 放行 HY2/VPN 等 UDP 服务，例如 `20000-20199`；直接回车清空额外 UDP 端口。 |
-| `4. 启用本脚本管理的防火墙` | 保留当前额外端口，启用“默认拒绝入站”。 |
-| `5. 恢复为仅放行 SSH 端口` | 清空额外 TCP/UDP 端口，只保留 SSH。 |
-| `6. 停用本脚本管理的防火墙` | 删除本项目的规则表和启动项；不会停止 nftables 服务，不会清空 Docker、Fail2ban 或其他程序的规则。 |
+| `2. 设置额外 TCP 放行端口` | **覆盖设置** TCP 额外端口，例如 `80,443,51820` 或 `20000-20199`；不会保留未再次填写的旧端口。输入处直接回车，再在确认处输入 `y`，才会清空额外 TCP 端口。 |
+| `3. 设置额外 UDP 放行端口` | **覆盖设置** UDP 额外端口，例如 `20000-20199`；不会保留未再次填写的旧端口。输入处直接回车，再在确认处输入 `y`，才会清空额外 UDP 端口。 |
+| `4. 启用本脚本管理的防火墙` | 相当于打开“本脚本的防火墙开关”：恢复默认拒绝入站，同时保留已经保存的额外端口。适合先前选过 `6`、现在想重新开启时使用。 |
+| `5. 恢复为仅放行 SSH 端口` | 回到首次执行后的基础防火墙状态：开启默认拒绝入站，清空本项目的额外 TCP/UDP 端口，只放行当前 SSH TCP 端口；不清空 Docker、Fail2ban 等其他规则。 |
+| `6. 停用本脚本管理的防火墙` | 相当于关闭“本脚本的防火墙开关”：删除本项目的默认拒绝规则，但保留端口设置，之后可用 `4` 恢复；不会停止 nftables 服务，也不会清空 Docker、Fail2ban 或其他程序的规则。 |
 | `7. 重新加载本脚本管理的防火墙` | 只校验并重载本项目规则，不重启 nftables 服务。 |
+| `8. 追加额外 TCP 放行端口` | **追加设置** TCP 端口：保留当前端口，只加入这次输入的新端口/范围；自动去重并合并相邻范围。直接回车取消，不修改任何端口。 |
+| `9. 追加额外 UDP 放行端口` | **追加设置** UDP 端口：保留当前端口，只加入这次输入的新端口/范围；自动去重并合并相邻范围。直接回车取消，不修改任何端口。 |
 | `0. 返回主菜单` | 不修改防火墙。 |
+
+例如当前 TCP 已放行 `80,443`，想再开放 `51820`，请选择 `8` 并输入 `51820`；结果会变成 `80,443,51820`。只有想完全改成另一组端口时，才选择 `2` 或 `3`。
 
 要直接进入防火墙菜单：
 
@@ -115,12 +119,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本完整校验
 
-高价值 VPS 建议先校验安装器本身。当前版本为 `v1.3.5`。
+高价值 VPS 建议先校验安装器本身。当前版本为 `v1.3.6`。
 
 ### Debian
 
 ```bash
-version=v1.3.5
+version=v1.3.6
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -131,7 +135,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.5'
+$version = 'v1.3.6'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
