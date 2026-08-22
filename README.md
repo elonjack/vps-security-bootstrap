@@ -31,7 +31,7 @@ curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/do
 irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1 | iex
 ```
 
-安装器会下载固定版本的主脚本和 SHA-256 文件，校验通过后才启动向导。Debian 安装器只接受 Debian 12/13；Windows 安装器只接受 Windows 11。
+安装器会下载固定版本的主脚本，并在启动前校验 SHA-256。Windows 安装器把对应主脚本的 SHA-256 固定在安装器内，不再从同一下载位置取得用于校验的哈希文件。Debian 安装器只接受 Debian 12/13；Windows 安装器只接受 Windows 11。
 
 ## 开始前必须做的事
 
@@ -103,7 +103,7 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | 来源白名单 | 填固定公网 IP/CIDR 后，只有这些来源能访问 RDP；动态 IP 请选 `Any`。 |
 | NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。 |
 | Windows 防火墙 | 启用全部配置文件并默认拒绝入站，只允许配置的 RDP TCP/UDP 端口和来源。 |
-| RDP Guard | 可选。默认同一来源 5 分钟内失败 5 次，封禁 1 天。 |
+| RDP Guard | 可选。默认同一来源在 5 分钟内发生 5 次 **RDP（RemoteInteractive）** 登录失败时，封禁 1 天；不会因 SMB 等普通网络登录失败而误封 RDP。 |
 | 账户锁定策略 | 可选。默认连续失败 10 次锁定 15 分钟。 |
 | Telegram | 可选；Token 仅允许 `Administrators` 和 `SYSTEM` 访问，启用前必须成功发送测试消息。 |
 
@@ -117,14 +117,14 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 
 Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需要恢复时，在管理员 PowerShell 中运行该目录的 `restore.ps1`。
 
-## 固定版本完整校验
+## 固定版本与完整性校验
 
-高价值 VPS 建议先校验安装器本身。当前版本为 `v1.3.6`。
+当前版本为 `v1.3.7`。安装器只会运行与其内置 SHA-256 匹配的主脚本。请注意：`irm … | iex` 本身仍要求你信任下载到的安装器；哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.3.6
+version=v1.3.7
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -135,7 +135,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.6'
+$version = 'v1.3.7'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256

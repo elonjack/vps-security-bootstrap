@@ -163,6 +163,9 @@ jobs:
           if ((Get-RdpGuardSource) -notmatch 'protectedPorts') {
             throw 'RDP Guard must protect both the current and target ports before reboot.'
           }
+          if ((Get-RdpGuardSource) -notmatch "LogonType -ne '10'") {
+            throw 'RDP Guard must only count RemoteInteractive (RDP) failures by default.'
+          }
           if ((Get-RdpPortCleanupSource) -notmatch 'VpsSecurity-RdpAllow-Current-\*') {
             throw 'The one-time old-port cleanup rule is missing.'
           }
@@ -193,4 +196,22 @@ jobs:
           }
           if (-not (Select-String -Path $installerPath -SimpleMatch 'Get-FileHash')) {
             throw 'Windows installer must verify SHA-256 before execution.'
+          }
+          if (Select-String -Path $installerPath -SimpleMatch 'windows-bootstrap.ps1.sha256') {
+            throw 'Windows installer must use its pinned bootstrap SHA-256, not download a peer checksum.'
+          }
+          $expectedHashMatch = [regex]::Match(
+            $installerDefinition,
+            '(?m)^\$expectedScriptSha256\s*=\s*''(?<hash>[A-Fa-f0-9]{64})''\s*$'
+          )
+          if (-not $expectedHashMatch.Success) {
+            throw 'Windows installer must pin the bootstrap SHA-256.'
+          }
+          $actualBootstrapHash = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash
+          if (-not [string]::Equals(
+            $actualBootstrapHash,
+            $expectedHashMatch.Groups['hash'].Value,
+            [StringComparison]::OrdinalIgnoreCase
+          )) {
+            throw 'The Windows installer pinned SHA-256 does not match windows-bootstrap.ps1.'
           }
