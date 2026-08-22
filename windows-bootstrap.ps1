@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.6'
+$script:ScriptVersion = 'v1.3.7'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1216,7 +1216,10 @@ try {
       $fields[[string]$field.Name] = [string]$field.'#text'
     }
 
-    if ($fields.LogonType -notin @('3', '10')) { continue }
+    # Only RemoteInteractive (10) identifies an RDP sign-in. Logon type 3 is
+    # a generic network sign-in (for example SMB), so counting it here can
+    # incorrectly ban a legitimate client from RDP.
+    if ($fields.LogonType -ne '10') { continue }
     $status = ([string]$fields.Status).ToLowerInvariant()
     $subStatus = ([string]$fields.SubStatus).ToLowerInvariant()
     $passwordFailure = @('0xc0000064', '0xc000006a', '0xc000006d')
