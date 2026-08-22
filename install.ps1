@@ -22,30 +22,18 @@ if ([int]$currentVersion.CurrentBuildNumber -lt 22000) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'elonjack/vps-security-bootstrap'
-$releaseVersion = 'v1.3.6'
+$releaseVersion = 'v1.3.7'
+$expectedScriptSha256 = 'EC79216B85547B0EE11DE965A40C0C1F19AAA5B212EA76D957781008E5A9BD55'
 $workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$releaseVersion-$([guid]::NewGuid().ToString('N'))"
 $baseUrl = "https://github.com/$repository/releases/download/$releaseVersion"
 $scriptPath = Join-Path $workDirectory 'windows-bootstrap.ps1'
-$checksumPath = Join-Path $workDirectory 'windows-bootstrap.ps1.sha256'
 
 try {
   New-Item -ItemType Directory -Path $workDirectory -Force | Out-Null
   Write-Output "正在下载并校验 $releaseVersion..."
   Invoke-WebRequest -Uri "$baseUrl/windows-bootstrap.ps1" -OutFile $scriptPath -UseBasicParsing
-  Invoke-WebRequest -Uri "$baseUrl/windows-bootstrap.ps1.sha256" -OutFile $checksumPath -UseBasicParsing
-
-  $checksum = Get-Content -LiteralPath $checksumPath -Raw -Encoding Ascii
-  $match = [regex]::Match(
-    $checksum,
-    '^(?<hash>[A-Fa-f0-9]{64})\s+\*?windows-bootstrap\.ps1\s*$'
-  )
-  if (-not $match.Success) {
-    throw 'Release SHA-256 文件格式无效。'
-  }
-
-  $expected = $match.Groups['hash'].Value
   $actual = (Get-FileHash -LiteralPath $scriptPath -Algorithm SHA256).Hash
-  if (-not [string]::Equals($actual, $expected, [StringComparison]::OrdinalIgnoreCase)) {
+  if (-not [string]::Equals($actual, $expectedScriptSha256, [StringComparison]::OrdinalIgnoreCase)) {
     throw 'SHA-256 校验失败，脚本不会运行。'
   }
 
