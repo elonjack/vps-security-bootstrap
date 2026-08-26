@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.10'
+readonly SCRIPT_VERSION='v1.3.11'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -795,6 +795,17 @@ EOF
   [ -z "$TELEGRAM_TOKEN" ] || prompt_line "  Telegram 名称：${TELEGRAM_VPS_NAME:-$(hostname)}"
   ask_yes_no '确认执行以上配置？' n || die '已取消，未修改系统。'
 }
+
+# CI uses this path to exercise the real config renderer without requiring a
+# Debian host, root privileges, or any system mutation.
+if [ "${VPS_SECURITY_TEST_FIREWALL_RENDER:-0}" = 1 ]; then
+  test_render_file=$(mktemp) || exit 1
+  trap 'rm -f "$test_render_file"' EXIT
+  render_firewall_config "$test_render_file" 52022 '' ''
+  grep -Fx '    include "/etc/vps-security/he-protocol41.nft"' "$test_render_file"
+  ! grep -F '$FIREWALL_HE_RULE_FILE' "$test_render_file"
+  exit 0
+fi
 
 [ "$EUID" -eq 0 ] || die '请以 root 运行：sudo bash bootstrap.sh …'
 [ -r /etc/debian_version ] || die '此脚本仅面向 Debian 12 或 13。'
