@@ -43,6 +43,7 @@ jobs:
           grep -F '[ -r /dev/tty ]' install.sh
           grep -F "readonly FIREWALL_TABLE='vps_security_bootstrap'" bootstrap.sh
           grep -F 'type filter hook input priority filter; policy drop;' bootstrap.sh
+          grep -F 'include "$FIREWALL_INPUT_EXTENSION_DIR/*.nft"' bootstrap.sh
           grep -F 'flags interval' bootstrap.sh
           grep -F 'nft delete table inet "$FIREWALL_TABLE"' bootstrap.sh
           grep -F '停用本脚本管理的防火墙' bootstrap.sh

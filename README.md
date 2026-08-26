@@ -50,6 +50,8 @@ irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/
 | `3. nftables 防火墙操作` | 进入防火墙子菜单，管理本项目的入站放行端口。 | 不会修改 SSH 公钥或 Fail2ban。网站、HY2、VPN 等端口必须在这里明确放行。 |
 | `0. 退出` | 不做任何修改。 | — |
 
+防火墙在 `nftables-input.d/` 预留了仅供受信任集成使用的规则入口；普通使用不需要操作或编辑它。该入口会在防火墙重载和开机时保留，避免外部集成通过临时规则绕开本脚本的持久化管理。
+
 选择 `1` 后，向导会依次询问以下内容；所有修改会在最后确认后才执行。
 
 | 项目 | 作用 |
@@ -119,12 +121,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.3.7`。安装器只会运行与其内置 SHA-256 匹配的主脚本。请注意：`irm … | iex` 本身仍要求你信任下载到的安装器；哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.3.8`。安装器只会运行与其内置 SHA-256 匹配的主脚本。请注意：`irm … | iex` 本身仍要求你信任下载到的安装器；哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.3.7
+version=v1.3.8
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -135,7 +137,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.7'
+$version = 'v1.3.8'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
