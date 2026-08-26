@@ -43,7 +43,8 @@ jobs:
           grep -F '[ -r /dev/tty ]' install.sh
           grep -F "readonly FIREWALL_TABLE='vps_security_bootstrap'" bootstrap.sh
           grep -F 'type filter hook input priority filter; policy drop;' bootstrap.sh
-          grep -F 'include "$FIREWALL_HE_RULE_FILE"' bootstrap.sh
+          grep -F "printf '    include \"%s\"\\n' \"\$FIREWALL_HE_RULE_FILE\"" bootstrap.sh
+          ! grep -F 'include "$FIREWALL_HE_RULE_FILE"' bootstrap.sh
           ! grep -F 'include "$LEGACY_FIREWALL_INPUT_EXTENSION_DIR/*.nft"' bootstrap.sh
           grep -F 'prepare_he_rule_file' bootstrap.sh
           grep -F 'flags interval' bootstrap.sh

@@ -22,8 +22,8 @@ if ([int]$currentVersion.CurrentBuildNumber -lt 22000) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'elonjack/vps-security-bootstrap'
-$releaseVersion = 'v1.3.9'
-$expectedScriptSha256 = 'F1CF69BD9A5E1C113E29AC01E89AC22B13A6AD7D36D00A0DB667C671F7BE2086'
+$releaseVersion = 'v1.3.10'
+$expectedScriptSha256 = '17420D3E0013591EA6F7465E5BAB5123AEF58E9440420116E5DADA962D3AD7EC'
 $workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$releaseVersion-$([guid]::NewGuid().ToString('N'))"
 $baseUrl = "https://github.com/$repository/releases/download/$releaseVersion"
 $scriptPath = Join-Path $workDirectory 'windows-bootstrap.ps1'
