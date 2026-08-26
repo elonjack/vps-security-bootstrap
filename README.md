@@ -85,6 +85,26 @@ irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/
 bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh) --firewall
 ```
 
+### HE IPv6 Switch 联动（可选）
+
+本项目的防火墙会创建一个 root 专用、可持久化的规则片段目录：`/etc/vps-security/nftables-input.d/`。目录默认是空的，且主规则中只包含一个“加载该目录下 `*.nft` 文件”的位置；**不使用 HE 的 VPS 不会因此放行任何端口、协议或 IPv6 流量，默认拒绝入站策略完全不变。**
+
+最新版 [HE IPv6 Switch](https://github.com/elonjack/he-ipv6-switch) 检测到本项目防火墙已启用时，才会在该目录创建它自己管理的 `50-he-ipv6-switch.nft`：
+
+```nft
+ip saddr <HE Server IPv4> ip protocol 41 accept comment "HE IPv6 SIT tunnel"
+```
+
+这是一条严格的 IPv4 **IP 协议 41** 白名单，不是开放 TCP/UDP 41 端口。HE 换节点时，HE 脚本先同时允许旧、新端点，确认新隧道可用后只保留新端点；在 HE 脚本中选择“恢复原生 IPv6”则会删除该文件。Bootstrap 不会自行创建 HE 白名单，也不读取 HE 的任何信息。
+
+新 VPS 的推荐顺序是：先运行本脚本并启用防火墙，再运行 HE IPv6 Switch。已经安装本项目旧版本且计划使用 HE 的 VPS，先下载最新版并进入防火墙菜单：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh) --firewall
+```
+
+然后选择 `4. 启用本脚本管理的防火墙`，它会保留已保存的额外 TCP/UDP 端口并重新生成兼容的持久化规则；最后运行 HE IPv6 Switch 即可。若你从未运行 HE 脚本，无需在 Bootstrap 中做任何额外操作。
+
 ## Windows 11 菜单说明
 
 以管理员身份运行后，输入相应数字；`0` 表示退出且不修改系统。
