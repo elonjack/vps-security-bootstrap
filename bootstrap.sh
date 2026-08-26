@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.7'
+readonly SCRIPT_VERSION='v1.3.8'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -20,6 +20,7 @@ readonly FIREWALL_TABLE='vps_security_bootstrap'
 readonly FIREWALL_CONFIG="$CONF_DIR/nftables.conf"
 readonly FIREWALL_TCP_PORTS_FILE="$CONF_DIR/firewall-tcp-ports"
 readonly FIREWALL_UDP_PORTS_FILE="$CONF_DIR/firewall-udp-ports"
+readonly FIREWALL_INPUT_EXTENSION_DIR="$CONF_DIR/nftables-input.d"
 readonly FIREWALL_LOADER='/usr/local/sbin/vps-security-load-firewall'
 readonly NFTABLES_DROPIN_DIR='/etc/systemd/system/nftables.service.d'
 readonly NFTABLES_DROPIN="$NFTABLES_DROPIN_DIR/20-vps-security-bootstrap.conf"
@@ -297,6 +298,8 @@ render_firewall_config() {
     cat <<EOF
 # Managed by $APP. Use the nftables firewall menu in bootstrap.sh to change ports.
 # This file owns only table inet $FIREWALL_TABLE; it never flushes the global ruleset.
+# Trusted integrations may add narrowly scoped input rules under
+# $FIREWALL_INPUT_EXTENSION_DIR. These fragments are loaded before port rules.
 table inet $FIREWALL_TABLE {
   set allowed_tcp_ports {
     type inet_service
@@ -321,6 +324,7 @@ EOF
     iifname "lo" accept
     ip protocol icmp accept
     meta l4proto icmpv6 accept
+    include "$FIREWALL_INPUT_EXTENSION_DIR/*.nft"
     tcp dport @allowed_tcp_ports accept
     udp dport @allowed_udp_ports accept
   }
@@ -364,6 +368,7 @@ apply_firewall_policy() {
   extra_tcp=$(normalize_port_specs "$extra_tcp") || return 1
   extra_udp=$(normalize_port_specs "$extra_udp") || return 1
   install -d -o root -g root -m 0700 "$CONF_DIR"
+  install -d -o root -g root -m 0700 "$FIREWALL_INPUT_EXTENSION_DIR"
   install -d -o root -g root -m 0755 "$NFTABLES_DROPIN_DIR"
   config_tmp=$(mktemp "$CONF_DIR/nftables.conf.XXXXXX") || return 1
   tcp_tmp=$(mktemp "$CONF_DIR/firewall-tcp-ports.XXXXXX") || { rm -f "$config_tmp"; return 1; }
