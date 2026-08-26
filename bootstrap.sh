@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.3.8'
+readonly SCRIPT_VERSION='v1.3.9'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -20,7 +20,9 @@ readonly FIREWALL_TABLE='vps_security_bootstrap'
 readonly FIREWALL_CONFIG="$CONF_DIR/nftables.conf"
 readonly FIREWALL_TCP_PORTS_FILE="$CONF_DIR/firewall-tcp-ports"
 readonly FIREWALL_UDP_PORTS_FILE="$CONF_DIR/firewall-udp-ports"
-readonly FIREWALL_INPUT_EXTENSION_DIR="$CONF_DIR/nftables-input.d"
+readonly FIREWALL_HE_RULE_FILE="$CONF_DIR/he-protocol41.nft"
+readonly LEGACY_FIREWALL_INPUT_EXTENSION_DIR="$CONF_DIR/nftables-input.d"
+readonly LEGACY_FIREWALL_HE_RULE_FILE="$LEGACY_FIREWALL_INPUT_EXTENSION_DIR/50-he-ipv6-switch.nft"
 readonly FIREWALL_LOADER='/usr/local/sbin/vps-security-load-firewall'
 readonly NFTABLES_DROPIN_DIR='/etc/systemd/system/nftables.service.d'
 readonly NFTABLES_DROPIN="$NFTABLES_DROPIN_DIR/20-vps-security-bootstrap.conf"
@@ -298,8 +300,8 @@ render_firewall_config() {
     cat <<EOF
 # Managed by $APP. Use the nftables firewall menu in bootstrap.sh to change ports.
 # This file owns only table inet $FIREWALL_TABLE; it never flushes the global ruleset.
-# Trusted integrations may add narrowly scoped input rules under
-# $FIREWALL_INPUT_EXTENSION_DIR. These fragments are loaded before port rules.
+# This fixed, root-only file is intentionally empty unless HE IPv6 Switch is used.
+# It is loaded before port rules; arbitrary directories are never included.
 table inet $FIREWALL_TABLE {
   set allowed_tcp_ports {
     type inet_service
@@ -324,7 +326,7 @@ EOF
     iifname "lo" accept
     ip protocol icmp accept
     meta l4proto icmpv6 accept
-    include "$FIREWALL_INPUT_EXTENSION_DIR/*.nft"
+    include "$FIREWALL_HE_RULE_FILE"
     tcp dport @allowed_tcp_ports accept
     udp dport @allowed_udp_ports accept
   }
@@ -335,16 +337,42 @@ EOF
 
 restore_firewall_files() {
   local backup_dir=$1 target backup
-  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
+  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_HE_RULE_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
     backup="$backup_dir/$(basename "$target")"
     if [ -e "$backup" ]; then
-      install -d -m 0755 "$(dirname "$target")"
+      if [ "$target" = "$NFTABLES_DROPIN" ]; then
+        install -d -o root -g root -m 0755 "$NFTABLES_DROPIN_DIR"
+      else
+        install -d -o root -g root -m 0700 "$CONF_DIR"
+      fi
       cp -a "$backup" "$target"
     else
       rm -f "$target"
     fi
   done
   systemctl daemon-reload 2>/dev/null || true
+}
+
+prepare_he_rule_file() {
+  local temporary source=''
+  if [ -e "$FIREWALL_HE_RULE_FILE" ]; then
+    [ -f "$FIREWALL_HE_RULE_FILE" ] && [ ! -L "$FIREWALL_HE_RULE_FILE" ] || return 1
+    chown root:root "$FIREWALL_HE_RULE_FILE" && chmod 0600 "$FIREWALL_HE_RULE_FILE"
+    return
+  fi
+  if [ -f "$LEGACY_FIREWALL_HE_RULE_FILE" ] && [ ! -L "$LEGACY_FIREWALL_HE_RULE_FILE" ]; then
+    source=$LEGACY_FIREWALL_HE_RULE_FILE
+  fi
+  temporary=$(mktemp "$CONF_DIR/he-protocol41.nft.XXXXXX") || return 1
+  if [ -n "$source" ]; then
+    cp -- "$source" "$temporary" || { rm -f "$temporary"; return 1; }
+  else
+    : > "$temporary"
+  fi
+  chown root:root "$temporary" && chmod 0600 "$temporary" && mv -f "$temporary" "$FIREWALL_HE_RULE_FILE" || {
+    rm -f "$temporary"
+    return 1
+  }
 }
 
 apply_firewall_policy() {
@@ -368,7 +396,6 @@ apply_firewall_policy() {
   extra_tcp=$(normalize_port_specs "$extra_tcp") || return 1
   extra_udp=$(normalize_port_specs "$extra_udp") || return 1
   install -d -o root -g root -m 0700 "$CONF_DIR"
-  install -d -o root -g root -m 0700 "$FIREWALL_INPUT_EXTENSION_DIR"
   install -d -o root -g root -m 0755 "$NFTABLES_DROPIN_DIR"
   config_tmp=$(mktemp "$CONF_DIR/nftables.conf.XXXXXX") || return 1
   tcp_tmp=$(mktemp "$CONF_DIR/firewall-tcp-ports.XXXXXX") || { rm -f "$config_tmp"; return 1; }
@@ -390,25 +417,32 @@ apply_firewall_policy() {
   chmod 0644 "$config_tmp"
   chmod 0600 "$tcp_tmp" "$udp_tmp"
 
+  targets=("$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_HE_RULE_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN")
+  for target in "${targets[@]}"; do
+    if [ -e "$target" ]; then
+      cp -a "$target" "$backup_dir/$(basename "$target")" || {
+        rm -rf -- "$backup_dir"
+        rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
+        return 1
+      }
+    fi
+  done
+  if ! prepare_he_rule_file; then
+    restore_firewall_files "$backup_dir"
+    rm -rf -- "$backup_dir"
+    rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
+    return 1
+  fi
+
   # Validate against a throwaway table name so a currently loaded managed table cannot mask syntax errors.
   sed "s/$FIREWALL_TABLE/${FIREWALL_TABLE}_validation_$$/g" "$config_tmp" > "$validation_tmp"
   if ! nft -c -f "$validation_tmp"; then
+    restore_firewall_files "$backup_dir"
     rm -rf -- "$backup_dir"
     rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp" "$validation_tmp"
     return 1
   fi
   rm -f "$validation_tmp"
-
-  targets=("$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN")
-  for target in "${targets[@]}"; do
-    if [ -e "$target" ]; then
-      cp -a "$target" "$backup_dir/$(basename "$target")" || {
-        rm -rf -- "$backup_dir"
-        rm -f "$config_tmp" "$tcp_tmp" "$udp_tmp" "$loader_tmp"
-        return 1
-      }
-    fi
-  done
 
   nft_bin=$(command -v nft)
   cat > "$loader_tmp" <<EOF
@@ -963,6 +997,7 @@ backup_if_exists "$LEGACY_TELEGRAM_CONTROL_SERVICE" legacy-telegram-control-serv
 backup_if_exists "$FIREWALL_CONFIG" firewall-config.before
 backup_if_exists "$FIREWALL_TCP_PORTS_FILE" firewall-tcp-ports.before
 backup_if_exists "$FIREWALL_UDP_PORTS_FILE" firewall-udp-ports.before
+backup_if_exists "$FIREWALL_HE_RULE_FILE" firewall-he-rule.before
 backup_if_exists "$FIREWALL_LOADER" firewall-loader.before
 backup_if_exists "$NFTABLES_DROPIN" nftables-dropin.before
 systemctl is-active --quiet fail2ban 2>/dev/null && FAIL2BAN_WAS_ACTIVE=1
@@ -982,11 +1017,12 @@ restore_backup_or_remove() {
 
 restore_firewall_state() {
   local target backup_name
-  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
+  for target in "$FIREWALL_CONFIG" "$FIREWALL_TCP_PORTS_FILE" "$FIREWALL_UDP_PORTS_FILE" "$FIREWALL_HE_RULE_FILE" "$FIREWALL_LOADER" "$NFTABLES_DROPIN"; do
     case "$target" in
       "$FIREWALL_CONFIG") backup_name=firewall-config.before ;;
       "$FIREWALL_TCP_PORTS_FILE") backup_name=firewall-tcp-ports.before ;;
       "$FIREWALL_UDP_PORTS_FILE") backup_name=firewall-udp-ports.before ;;
+      "$FIREWALL_HE_RULE_FILE") backup_name=firewall-he-rule.before ;;
       "$FIREWALL_LOADER") backup_name=firewall-loader.before ;;
       "$NFTABLES_DROPIN") backup_name=nftables-dropin.before ;;
     esac
