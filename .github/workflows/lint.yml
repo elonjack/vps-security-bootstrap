@@ -262,9 +262,36 @@ jobs:
             throw 'The restore script must handle an initially absent Remote Assistance registry key.'
           }
           $scriptDefinition = Get-Content -LiteralPath $path -Raw -Encoding UTF8
-          if ($scriptDefinition -notmatch 'remoteAssistanceExportExitCode' -or
+          if ($scriptDefinition -notmatch 'function Export-RegistryKeyBackup' -or
+              $scriptDefinition -notmatch 'terminal-server\.missing' -or
               $scriptDefinition -notmatch 'New-Item -Path \$script:RemoteAssistancePath -Force') {
-            throw 'Backup and apply must support an initially absent Remote Assistance registry key.'
+            throw 'Backup and apply must support initially absent Windows registry keys.'
+          }
+          $registryBackupTestRoot = Join-Path $env:TEMP ('vps-registry-backup-test-' + [guid]::NewGuid().ToString('N'))
+          New-Item -ItemType Directory -Path $registryBackupTestRoot | Out-Null
+          try {
+            $missingMarker = Join-Path $registryBackupTestRoot 'missing.marker'
+            Export-RegistryKeyBackup `
+              -RegistryPath 'HKLM:\SOFTWARE\VpsSecurityBootstrap-CI-Missing' `
+              -RegistryKey 'HKLM\SOFTWARE\VpsSecurityBootstrap-CI-Missing' `
+              -ExportPath (Join-Path $registryBackupTestRoot 'missing.reg') `
+              -MissingMarkerPath $missingMarker `
+              -Description 'CI missing key'
+            if (-not (Test-Path -LiteralPath $missingMarker)) {
+              throw 'A missing registry key must be recorded instead of exported.'
+            }
+            $presentExport = Join-Path $registryBackupTestRoot 'current-version.reg'
+            Export-RegistryKeyBackup `
+              -RegistryPath 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+              -RegistryKey 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion' `
+              -ExportPath $presentExport `
+              -MissingMarkerPath (Join-Path $registryBackupTestRoot 'unexpected.marker') `
+              -Description 'CI present key'
+            if (-not (Test-Path -LiteralPath $presentExport)) {
+              throw 'A present registry key must be exported.'
+            }
+          } finally {
+            Remove-Item -LiteralPath $registryBackupTestRoot -Recurse -Force -ErrorAction SilentlyContinue
           }
 
           $versionMatch = Select-String -Path $path -Pattern "ScriptVersion = '(v[^']+)'"
