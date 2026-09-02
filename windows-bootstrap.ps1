@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.18'
+$script:ScriptVersion = 'v1.3.19'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1565,7 +1565,7 @@ function Set-RdpFirewallRule {
   param(
     [Parameter(Mandatory)][int]$Port,
     [Parameter(Mandatory)][int]$CurrentPort,
-    [Parameter(Mandatory)][string[]]$RemoteAddresses
+    [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RemoteAddresses
   )
 
   if (-not $PSCmdlet.ShouldProcess("RDP TCP/UDP 端口 $Port", '更新 Windows 防火墙规则')) { return }
