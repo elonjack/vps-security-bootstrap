@@ -113,14 +113,21 @@ jobs:
 
           $installerDefinition = Get-Content -LiteralPath $installerPath -Raw -Encoding UTF8
           if ($installerDefinition -match '(?m)^\s*param\s*\(') {
-            throw 'install.ps1 must not use a script-level param block: its quick command executes it with Invoke-Expression.'
+            throw 'install.ps1 must not use a script-level param block: the documented startup has no installer parameters.'
           }
           if ($installerDefinition -match '(?m)^\s*\[CmdletBinding\(\)\]') {
-            throw 'install.ps1 must not use script-level CmdletBinding: Invoke-Expression cannot run it safely.'
+            throw 'install.ps1 must not use script-level CmdletBinding: the documented startup has no installer parameters.'
           }
 
           Set-ExecutionPolicy -Scope Process -ExecutionPolicy Bypass -Force
           . $path
+          $originalReadDefault = ${function:Read-Default}
+          function Read-Default { param([string]$Prompt, [string]$Default) return '0' }
+          try {
+            Show-MainMenu | Out-Null
+          } finally {
+            Set-Item -Path Function:\Read-Default -Value $originalReadDefault
+          }
           foreach ($source in @(
             (Get-RdpGuardSource),
             (Get-RestoreSource),
@@ -204,6 +211,12 @@ jobs:
           }
           if (Select-String -Path $installerPath -SimpleMatch 'windows-bootstrap.ps1.sha256') {
             throw 'Windows installer must use its pinned bootstrap SHA-256, not download a peer checksum.'
+          }
+          if (Select-String -Path README.md, $installerPath -SimpleMatch '| iex') {
+            throw 'Windows installation must not pipe a UTF-8 BOM installer to Invoke-Expression.'
+          }
+          if (-not (Select-String -Path README.md -SimpleMatch '-File $installer')) {
+            throw 'README Windows quick start must download and execute the installer as a file.'
           }
           $expectedHashMatch = [regex]::Match(
             $installerDefinition,
