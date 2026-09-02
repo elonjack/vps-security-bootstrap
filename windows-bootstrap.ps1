@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.19'
+$script:ScriptVersion = 'v1.3.20'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1493,15 +1493,17 @@ try {
 }
 
 function Install-RdpGuard {
+  [CmdletBinding(SupportsShouldProcess)]
   param(
     [Parameter(Mandatory)][int]$Port,
     [Parameter(Mandatory)][int[]]$ProtectedPorts,
-    [Parameter(Mandatory)][string[]]$TrustedAddresses,
+    [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$TrustedAddresses,
     [Parameter(Mandatory)][int]$Threshold,
     [Parameter(Mandatory)][int]$WindowMinutes,
     [Parameter(Mandatory)][int]$BlockMinutes
   )
 
+  if (-not $PSCmdlet.ShouldProcess("RDP 端口 $Port", '安装 RDP Guard 自动封禁')) { return }
   Write-Title '安装事件驱动的 RDP Guard'
   Protect-DataDirectory
   Set-Content -LiteralPath $script:GuardPath -Value (Get-RdpGuardSource) -Encoding UTF8
