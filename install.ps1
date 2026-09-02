@@ -25,8 +25,8 @@ if ([int]$currentVersion.CurrentBuildNumber -lt 22000) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'elonjack/vps-security-bootstrap'
-$releaseVersion = 'v1.3.12'
-$expectedScriptSha256 = 'D531E90554CDDD0CDE3094BD4206B7E8DDA288D726B12506831F1F728E99E410'
+$releaseVersion = 'v1.3.13'
+$expectedScriptSha256 = '9EE295C489ABF24ED173AA374B5C3ACF7E3BF1F8B90D9AEDD1006FAB7F07091F'
 $workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$releaseVersion-$([guid]::NewGuid().ToString('N'))"
 $baseUrl = "https://github.com/$repository/releases/download/$releaseVersion"
 $scriptPath = Join-Path $workDirectory 'windows-bootstrap.ps1'
@@ -41,7 +41,15 @@ try {
   }
 
   Write-Output 'SHA-256 校验成功，正在启动 Windows 安全向导。'
-  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
+  $powerShellPath = if ([Environment]::Is64BitOperatingSystem -and -not [Environment]::Is64BitProcess) {
+    Join-Path $env:WINDIR 'Sysnative\WindowsPowerShell\v1.0\powershell.exe'
+  } else {
+    Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
+  }
+  if (-not (Test-Path -LiteralPath $powerShellPath)) {
+    throw "找不到可用的 Windows PowerShell：$powerShellPath"
+  }
+  & $powerShellPath -NoLogo -NoProfile -ExecutionPolicy Bypass -File $scriptPath
   if ($LASTEXITCODE -ne 0) {
     throw "Windows 安全向导失败，退出码：$LASTEXITCODE"
   }

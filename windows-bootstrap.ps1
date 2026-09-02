@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.12'
+$script:ScriptVersion = 'v1.3.13'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -377,18 +377,29 @@ function Get-DesiredTelegramConfiguration {
 }
 
 function Get-CurrentRdpPort {
-  $value = Get-ItemPropertyValue -Path $script:RdpRegistryPath -Name PortNumber
-  return [int]$value
+  try {
+    $value = Get-ItemPropertyValue -Path $script:RdpRegistryPath -Name PortNumber -ErrorAction Stop
+    return [int]$value
+  } catch {
+    Write-TerminatingError "无法读取当前 RDP 端口。请确认远程桌面服务已安装且注册表路径可访问。原始错误：$($_.Exception.Message)"
+  }
+}
+
+function Get-ListeningLocalPort {
+  try {
+    $ipProperties = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
+    return @(
+      @($ipProperties.GetActiveTcpListeners() | Select-Object -ExpandProperty Port) +
+      @($ipProperties.GetActiveUdpListeners() | Select-Object -ExpandProperty Port) |
+        Select-Object -Unique
+    )
+  } catch {
+    Write-TerminatingError "无法枚举本机监听端口；为避免选择冲突端口，已停止配置。原始错误：$($_.Exception.Message)"
+  }
 }
 
 function Get-RandomAvailablePort {
-  $usedPorts = @(@(
-    Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty LocalPort -Unique
-  ) + @(
-    Get-NetUDPEndpoint -ErrorAction SilentlyContinue |
-      Select-Object -ExpandProperty LocalPort -Unique
-  ))
+  $usedPorts = @(Get-ListeningLocalPort)
 
   $random = [Security.Cryptography.RandomNumberGenerator]::Create()
   try {
@@ -414,9 +425,7 @@ function Test-PortAvailable {
   )
 
   if ($Port -eq $CurrentPort) { return $true }
-  $tcpListener = Get-NetTCPConnection -State Listen -LocalPort $Port -ErrorAction SilentlyContinue
-  $udpListener = Get-NetUDPEndpoint -LocalPort $Port -ErrorAction SilentlyContinue
-  return $null -eq $tcpListener -and $null -eq $udpListener
+  return $Port -notin @(Get-ListeningLocalPort)
 }
 
 function Test-IpOrCidr {
@@ -506,11 +515,16 @@ function ConvertTo-RemoteAddressList {
 function Get-CurrentRdpClientAddress {
   param([Parameter(Mandatory)][int]$Port)
 
-  return @(
-    Get-NetTCPConnection -State Established -LocalPort $Port -ErrorAction SilentlyContinue |
-      Where-Object { $_.RemoteAddress -notin @('127.0.0.1', '::1') } |
-      Select-Object -ExpandProperty RemoteAddress -Unique
-  )
+  try {
+    return @(
+      Get-NetTCPConnection -State Established -LocalPort $Port -ErrorAction Stop |
+        Where-Object { $_.RemoteAddress -notin @('127.0.0.1', '::1') } |
+        Select-Object -ExpandProperty RemoteAddress -Unique
+    )
+  } catch {
+    Write-Verbose "无法检测当前 RDP 客户端地址，将跳过此提示：$($_.Exception.Message)"
+    return @()
+  }
 }
 
 function Invoke-NativeCommand {
@@ -1560,11 +1574,11 @@ function Show-SecurityStatus {
 
 function Get-InteractiveConfiguration {
   $currentPort = Get-CurrentRdpPort
-  $suggestedPort = if ($currentPort -eq 3389) { Get-RandomAvailablePort } else { $currentPort }
-  $clientAddresses = @(Get-CurrentRdpClientAddress -Port $currentPort)
 
   Write-Title 'Windows 11 RDP 安全向导'
   Write-Info "当前 RDP 端口：$currentPort"
+  $suggestedPort = if ($currentPort -eq 3389) { Get-RandomAvailablePort } else { $currentPort }
+  $clientAddresses = @(Get-CurrentRdpClientAddress -Port $currentPort)
   if ($clientAddresses.Count -gt 0) {
     Write-Info "检测到当前 RDP 客户端地址：$($clientAddresses -join ', ')"
   }
