@@ -160,6 +160,12 @@ jobs:
           if ($listeningPorts | Where-Object { $_ -lt 1 -or $_ -gt 65535 }) {
             throw 'Local listener enumeration returned an invalid port.'
           }
+          $emptyRemoteAddresses = [string[]]@()
+          Set-RdpFirewallRule `
+            -Port 50000 `
+            -CurrentPort 3389 `
+            -RemoteAddresses $emptyRemoteAddresses `
+            -WhatIf
           foreach ($source in @(
             (Get-RdpGuardSource),
             (Get-RestoreSource),
