@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.11'
+$script:ScriptVersion = 'v1.3.12'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1745,7 +1745,7 @@ function Invoke-TelegramConfiguration {
 }
 
 function Show-MainMenu {
-  Write-ColorLine -Text '' -Color Yellow
+  Write-Output ''
   Write-ColorLine -Text "PIKACHU SECURITY BOOTSTRAP $($script:ScriptVersion) · WINDOWS 11" -Color Yellow
   Write-ColorLine -Text '  1. 应用或更新 Windows 11 RDP 安全防护' -Color Yellow
   Write-ColorLine -Text '  2. 查看当前 Windows 11 安全状态' -Color Yellow

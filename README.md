@@ -28,7 +28,13 @@ curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/do
 用“管理员身份”打开 Windows PowerShell 后运行：
 
 ```powershell
-irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1 | iex
+$installer = Join-Path ([IO.Path]::GetTempPath()) 'vps-security-bootstrap-install.ps1'
+Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1' -OutFile $installer
+try {
+  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
+} finally {
+  Remove-Item -LiteralPath $installer -Force -ErrorAction SilentlyContinue
+}
 ```
 
 安装器会下载固定版本的主脚本，并在启动前校验 SHA-256。Windows 安装器把对应主脚本的 SHA-256 固定在安装器内，不再从同一下载位置取得用于校验的哈希文件。Debian 安装器只接受 Debian 12/13；Windows 安装器只接受 Windows 11。
@@ -141,12 +147,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.3.11`。安装器只会运行与其内置 SHA-256 匹配的主脚本。请注意：`irm … | iex` 本身仍要求你信任下载到的安装器；哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.3.12`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.3.11
+version=v1.3.12
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -157,7 +163,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.11'
+$version = 'v1.3.12'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256

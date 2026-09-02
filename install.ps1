@@ -4,7 +4,10 @@
   Downloads, verifies, and starts the Windows security bootstrap from a fixed release.
 
 .EXAMPLE
-  irm https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1 | iex
+  $installer = Join-Path ([IO.Path]::GetTempPath()) 'vps-security-bootstrap-install.ps1'
+  Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.ps1' -OutFile $installer
+  & powershell.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File $installer
+  Remove-Item -LiteralPath $installer -Force
 #>
 
 Set-StrictMode -Version Latest
@@ -22,8 +25,8 @@ if ([int]$currentVersion.CurrentBuildNumber -lt 22000) {
 
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $repository = 'elonjack/vps-security-bootstrap'
-$releaseVersion = 'v1.3.11'
-$expectedScriptSha256 = '49A2B9D0B098EB326BDFFD2670977CF830D507D5241D0527CBA90BC46CE96D03'
+$releaseVersion = 'v1.3.12'
+$expectedScriptSha256 = 'D531E90554CDDD0CDE3094BD4206B7E8DDA288D726B12506831F1F728E99E410'
 $workDirectory = Join-Path ([IO.Path]::GetTempPath()) "vps-security-$releaseVersion-$([guid]::NewGuid().ToString('N'))"
 $baseUrl = "https://github.com/$repository/releases/download/$releaseVersion"
 $scriptPath = Join-Path $workDirectory 'windows-bootstrap.ps1'
