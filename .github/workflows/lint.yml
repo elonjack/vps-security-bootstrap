@@ -124,9 +124,37 @@ jobs:
           $originalReadDefault = ${function:Read-Default}
           function Read-Default { param([string]$Prompt, [string]$Default) return '0' }
           try {
-            Show-MainMenu | Out-Null
+            $menuChoice = @(Show-MainMenu)
           } finally {
             Set-Item -Path Function:\Read-Default -Value $originalReadDefault
+          }
+          if ($menuChoice.Count -ne 1 -or $menuChoice[0] -ne '0') {
+            throw 'Main menu must return only the selected menu value.'
+          }
+          $originalReadDefault = ${function:Read-Default}
+          $originalReadYesNo = ${function:Read-YesNo}
+          $originalGetDesiredTelegramConfiguration = ${function:Get-DesiredTelegramConfiguration}
+          function Read-Default {
+            param([string]$Prompt, [string]$Default)
+            return $Default
+          }
+          function Read-YesNo { param([string]$Prompt, [string]$Default) return $true }
+          function Get-DesiredTelegramConfiguration {
+            return [pscustomobject]@{ Enabled = $false; Configuration = $null }
+          }
+          try {
+            $interactiveConfiguration = Get-InteractiveConfiguration
+          } finally {
+            Set-Item -Path Function:\Read-Default -Value $originalReadDefault
+            Set-Item -Path Function:\Read-YesNo -Value $originalReadYesNo
+            Set-Item `
+              -Path Function:\Get-DesiredTelegramConfiguration `
+              -Value $originalGetDesiredTelegramConfiguration
+          }
+          if (@($interactiveConfiguration).Count -ne 1 -or
+            $null -eq $interactiveConfiguration -or
+            $null -eq $interactiveConfiguration.PSObject.Properties['RemoteAddresses']) {
+            throw 'Interactive configuration must return only its configuration object.'
           }
           $listeningPorts = @(Get-ListeningLocalPort)
           if ($listeningPorts | Where-Object { $_ -lt 1 -or $_ -gt 65535 }) {

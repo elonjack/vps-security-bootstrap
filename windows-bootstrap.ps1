@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.13'
+$script:ScriptVersion = 'v1.3.14'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -115,7 +115,7 @@ function Write-ColorLine {
   if ($script:UseColor) {
     Write-Host $Text -ForegroundColor $Color
   } else {
-    Write-Output $Text
+    Write-Host $Text
   }
 }
 
@@ -1508,7 +1508,7 @@ function Invoke-WindowsUpdateControl {
   Assert-SupportedWindows
   while ($true) {
     Show-WindowsUpdateStatus
-    Write-Output ''
+    Write-Host ''
     Write-ColorLine -Text '  1. 禁用 Windows 自动更新（策略 + 停止并禁用 Windows Update 服务）' -Color Yellow
     Write-ColorLine -Text '  2. 恢复 Windows 默认更新行为（移除策略 + 按需启动服务）' -Color Yellow
     Write-ColorLine -Text '  0. 返回主菜单' -Color Yellow
@@ -1563,7 +1563,7 @@ function Show-SecurityStatus {
   Write-Output "Telegram：$(if ($telegramConfigured -and $telegramTask) { "已配置（任务 $($telegramTask.State)）" } else { '未启用' })"
   $windowsUpdateStatus = Get-WindowsUpdateStatus
   Write-Output "Windows 自动更新：$(if ($windowsUpdateStatus.PolicyDisablesAutomaticUpdates) { '已禁用' } else { '未由本脚本禁用' })"
-  Write-Output ''
+  Write-Host ''
   Write-Output '防火墙配置：'
   $profiles | Format-Table -AutoSize
   Write-Output '本脚本管理的规则：'
@@ -1595,7 +1595,7 @@ function Get-InteractiveConfiguration {
     }
   }
 
-  Write-Output ''
+  Write-Host ''
   Write-Info '来源限制最有效：只有固定公网 IP 时才填写；动态 IP 请直接回车。'
   $addressText = Read-Default -Prompt '允许访问 RDP 的固定 IP/CIDR（多个用英文逗号分隔）' -Default 'Any'
   $remoteAddresses = @()
@@ -1759,7 +1759,7 @@ function Invoke-TelegramConfiguration {
 }
 
 function Show-MainMenu {
-  Write-Output ''
+  Write-Host ''
   Write-ColorLine -Text "PIKACHU SECURITY BOOTSTRAP $($script:ScriptVersion) · WINDOWS 11" -Color Yellow
   Write-ColorLine -Text '  1. 应用或更新 Windows 11 RDP 安全防护' -Color Yellow
   Write-ColorLine -Text '  2. 查看当前 Windows 11 安全状态' -Color Yellow
