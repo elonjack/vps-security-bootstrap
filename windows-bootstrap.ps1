@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.15'
+$script:ScriptVersion = 'v1.3.16'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -600,10 +600,13 @@ function Save-SecurityBackup {
     'export', 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server',
     (Join-Path $backupPath 'terminal-server.reg'), '/y'
   ) | Out-Null
-  Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
+  $remoteAssistanceExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
     'export', 'HKLM\SYSTEM\CurrentControlSet\Control\Remote Assistance',
     (Join-Path $backupPath 'remote-assistance.reg'), '/y'
-  ) | Out-Null
+  ) -IgnoreExitCode
+  if ($remoteAssistanceExportExitCode -ne 0) {
+    New-Item -ItemType File -Path (Join-Path $backupPath 'remote-assistance.missing') -Force | Out-Null
+  }
   $policyExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
     'export', 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services',
     (Join-Path $backupPath 'terminal-server-policy.reg'), '/y'
@@ -726,7 +729,13 @@ Get-NetFirewallRule -Group 'VpsSecurityBootstrap' -ErrorAction SilentlyContinue 
   Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
 Invoke-RestoreNative 'reg.exe' @('import', (Join-Path $backupPath 'terminal-server.reg'))
-Invoke-RestoreNative 'reg.exe' @('import', (Join-Path $backupPath 'remote-assistance.reg'))
+$remoteAssistanceRegistry = Join-Path $backupPath 'remote-assistance.reg'
+$remoteAssistanceMissing = Join-Path $backupPath 'remote-assistance.missing'
+if (Test-Path -LiteralPath $remoteAssistanceRegistry) {
+  Invoke-RestoreNative 'reg.exe' @('import', $remoteAssistanceRegistry)
+} elseif (Test-Path -LiteralPath $remoteAssistanceMissing) {
+  Remove-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Recurse -Force -ErrorAction SilentlyContinue
+}
 $policyRegistry = Join-Path $backupPath 'terminal-server-policy.reg'
 $policyMissing = Join-Path $backupPath 'terminal-server-policy.missing'
 if (Test-Path -LiteralPath $policyRegistry) {
@@ -1434,6 +1443,7 @@ function Set-RdpSecuritySetting {
   if (-not $PSCmdlet.ShouldProcess("RDP 端口 $Port", '更新 RDP、NLA 和加密策略')) { return }
   Write-Title '配置 RDP、NLA 和加密策略'
   New-Item -Path $script:TerminalServerPolicyPath -Force | Out-Null
+  New-Item -Path $script:RemoteAssistancePath -Force | Out-Null
   New-ItemProperty -Path $script:TerminalServerPath -Name fDenyTSConnections -PropertyType DWord -Value 0 -Force | Out-Null
   New-ItemProperty -Path $script:RdpRegistryPath -Name PortNumber -PropertyType DWord -Value $Port -Force | Out-Null
   New-ItemProperty -Path $script:RdpRegistryPath -Name UserAuthentication -PropertyType DWord -Value 1 -Force | Out-Null

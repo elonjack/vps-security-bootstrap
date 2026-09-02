@@ -257,6 +257,15 @@ jobs:
           if ((Get-Content -LiteralPath $path -Raw -Encoding UTF8) -notmatch 'WindowsUpdate') {
             throw 'Windows Update menu action is missing.'
           }
+          $restoreSource = Get-RestoreSource
+          if ($restoreSource -notmatch 'remote-assistance\.missing') {
+            throw 'The restore script must handle an initially absent Remote Assistance registry key.'
+          }
+          $scriptDefinition = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+          if ($scriptDefinition -notmatch 'remoteAssistanceExportExitCode' -or
+              $scriptDefinition -notmatch 'New-Item -Path \$script:RemoteAssistancePath -Force') {
+            throw 'Backup and apply must support an initially absent Remote Assistance registry key.'
+          }
 
           $versionMatch = Select-String -Path $path -Pattern "ScriptVersion = '(v[^']+)'"
           if (-not $versionMatch) { throw 'Windows script version is missing.' }
