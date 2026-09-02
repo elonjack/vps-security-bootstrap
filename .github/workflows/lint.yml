@@ -204,6 +204,40 @@ jobs:
             $invalidTelegramCaught = $true
           }
           if (-not $invalidTelegramCaught) { throw 'Invalid Telegram settings were accepted.' }
+          $emptyTelegramTokenError = $null
+          try {
+            Assert-TelegramSetting `
+              -Token '' `
+              -ChatId '123456789' `
+              -VpsName 'CI-Windows'
+          } catch {
+            $emptyTelegramTokenError = $_
+          }
+          if ($null -eq $emptyTelegramTokenError -or
+              $emptyTelegramTokenError.CategoryInfo.Category -ne 'OperationStopped' -or
+              $emptyTelegramTokenError.Exception -is [System.Management.Automation.ParameterBindingException]) {
+            throw 'An empty Telegram Token must be rejected by the explicit validator, not parameter binding.'
+          }
+          $originalReadSecret = ${function:Read-Secret}
+          $originalReadDefault = ${function:Read-Default}
+          $tokenInputs = [Collections.Generic.Queue[string]]::new()
+          $tokenInputs.Enqueue('')
+          $tokenInputs.Enqueue('123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd')
+          function Read-Secret { param([string]$Prompt) return $tokenInputs.Dequeue() }
+          function Read-Default {
+            param([string]$Prompt, [string]$Default)
+            if ($Prompt -eq 'Telegram Chat ID') { return '123456789' }
+            return 'CI-Windows'
+          }
+          try {
+            $interactiveTelegram = Get-DesiredTelegramConfiguration -RotateOnly
+          } finally {
+            Set-Item -Path Function:\Read-Secret -Value $originalReadSecret
+            Set-Item -Path Function:\Read-Default -Value $originalReadDefault
+          }
+          if ($interactiveTelegram.Configuration.token -ne '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd') {
+            throw 'Interactive Telegram input must retry after an empty Token.'
+          }
           if ((Get-RdpGuardSource) -notmatch 'protectedPorts') {
             throw 'RDP Guard must protect both the current and target ports before reboot.'
           }
