@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.14'
+$script:ScriptVersion = 'v1.3.15'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -289,9 +289,9 @@ function Get-FirstFileValue {
 
 function Assert-TelegramSetting {
   param(
-    [Parameter(Mandatory)][string]$Token,
-    [Parameter(Mandatory)][string]$ChatId,
-    [Parameter(Mandatory)][string]$VpsName
+    [Parameter(Mandatory)][AllowEmptyString()][string]$Token,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$ChatId,
+    [Parameter(Mandatory)][AllowEmptyString()][string]$VpsName
   )
 
   if ($Token -notmatch '^[0-9]{6,12}:[A-Za-z0-9_-]{20,}$') {
@@ -362,13 +362,20 @@ function Get-DesiredTelegramConfiguration {
     }
   }
 
-  Write-Info 'Telegram Token 不会显示，也不会写入命令行历史；保存文件仅允许 Administrators 和 SYSTEM 读取。'
-  $token = Read-Secret -Prompt 'Telegram Bot Token'
   $defaultChatId = if ($existing) { [string]$existing.chatId } else { '' }
   $defaultVpsName = if ($existing) { [string]$existing.vpsName } else { $env:COMPUTERNAME }
-  $chatId = Read-Default -Prompt 'Telegram Chat ID' -Default $defaultChatId
-  $vpsName = Read-Default -Prompt 'Telegram 中显示的 VPS 名称' -Default $defaultVpsName
-  Assert-TelegramSetting -Token $token -ChatId $chatId -VpsName $vpsName
+  while ($true) {
+    Write-Info 'Telegram Token 不会显示，也不会写入命令行历史；保存文件仅允许 Administrators 和 SYSTEM 读取。'
+    $token = Read-Secret -Prompt 'Telegram Bot Token'
+    $chatId = Read-Default -Prompt 'Telegram Chat ID' -Default $defaultChatId
+    $vpsName = Read-Default -Prompt 'Telegram 中显示的 VPS 名称' -Default $defaultVpsName
+    try {
+      Assert-TelegramSetting -Token $token -ChatId $chatId -VpsName $vpsName
+      break
+    } catch {
+      Write-ColorLine -Text "Telegram 配置无效：$($_.Exception.Message) 请重新输入。" -Color Red
+    }
+  }
 
   return [pscustomobject]@{
     Enabled = $true
