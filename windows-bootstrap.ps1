@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.16'
+$script:ScriptVersion = 'v1.3.17'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -550,6 +550,29 @@ function Invoke-NativeCommand {
   return $exitCode
 }
 
+function Export-RegistryKeyBackup {
+  param(
+    [Parameter(Mandatory)][string]$RegistryPath,
+    [Parameter(Mandatory)][string]$RegistryKey,
+    [Parameter(Mandatory)][string]$ExportPath,
+    [Parameter(Mandatory)][string]$MissingMarkerPath,
+    [Parameter(Mandatory)][string]$Description
+  )
+
+  if (-not (Test-Path -LiteralPath $RegistryPath)) {
+    New-Item -ItemType File -Path $MissingMarkerPath -Force | Out-Null
+    Write-Verbose "备份时未找到 $Description，已记录为不存在。"
+    return
+  }
+
+  Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
+    'export', $RegistryKey, $ExportPath, '/y'
+  ) | Out-Null
+  if (-not (Test-Path -LiteralPath $ExportPath)) {
+    Write-TerminatingError "$Description 存在，但注册表导出没有生成备份文件：$ExportPath"
+  }
+}
+
 function Protect-DataDirectory {
   New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null
   New-Item -ItemType Directory -Path $script:BackupRoot -Force | Out-Null
@@ -596,31 +619,30 @@ function Save-SecurityBackup {
   $backupPath = Join-Path $script:BackupRoot $stamp
   New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
 
-  Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
-    'export', 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server',
-    (Join-Path $backupPath 'terminal-server.reg'), '/y'
-  ) | Out-Null
-  $remoteAssistanceExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
-    'export', 'HKLM\SYSTEM\CurrentControlSet\Control\Remote Assistance',
-    (Join-Path $backupPath 'remote-assistance.reg'), '/y'
-  ) -IgnoreExitCode
-  if ($remoteAssistanceExportExitCode -ne 0) {
-    New-Item -ItemType File -Path (Join-Path $backupPath 'remote-assistance.missing') -Force | Out-Null
-  }
-  $policyExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
-    'export', 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services',
-    (Join-Path $backupPath 'terminal-server-policy.reg'), '/y'
-  ) -IgnoreExitCode
-  if ($policyExportExitCode -ne 0) {
-    New-Item -ItemType File -Path (Join-Path $backupPath 'terminal-server-policy.missing') -Force | Out-Null
-  }
-  $windowsUpdatePolicyExportExitCode = Invoke-NativeCommand -FilePath 'reg.exe' -ArgumentList @(
-    'export', 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate',
-    (Join-Path $backupPath 'windows-update-policy.reg'), '/y'
-  ) -IgnoreExitCode
-  if ($windowsUpdatePolicyExportExitCode -ne 0) {
-    New-Item -ItemType File -Path (Join-Path $backupPath 'windows-update-policy.missing') -Force | Out-Null
-  }
+  Export-RegistryKeyBackup `
+    -RegistryPath $script:TerminalServerPath `
+    -RegistryKey 'HKLM\SYSTEM\CurrentControlSet\Control\Terminal Server' `
+    -ExportPath (Join-Path $backupPath 'terminal-server.reg') `
+    -MissingMarkerPath (Join-Path $backupPath 'terminal-server.missing') `
+    -Description '终端服务注册表项'
+  Export-RegistryKeyBackup `
+    -RegistryPath $script:RemoteAssistancePath `
+    -RegistryKey 'HKLM\SYSTEM\CurrentControlSet\Control\Remote Assistance' `
+    -ExportPath (Join-Path $backupPath 'remote-assistance.reg') `
+    -MissingMarkerPath (Join-Path $backupPath 'remote-assistance.missing') `
+    -Description '远程协助注册表项'
+  Export-RegistryKeyBackup `
+    -RegistryPath $script:TerminalServerPolicyPath `
+    -RegistryKey 'HKLM\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services' `
+    -ExportPath (Join-Path $backupPath 'terminal-server-policy.reg') `
+    -MissingMarkerPath (Join-Path $backupPath 'terminal-server-policy.missing') `
+    -Description '终端服务策略注册表项'
+  Export-RegistryKeyBackup `
+    -RegistryPath $script:WindowsUpdatePolicyPath `
+    -RegistryKey 'HKLM\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate' `
+    -ExportPath (Join-Path $backupPath 'windows-update-policy.reg') `
+    -MissingMarkerPath (Join-Path $backupPath 'windows-update-policy.missing') `
+    -Description 'Windows Update 策略注册表项'
   Invoke-NativeCommand -FilePath 'netsh.exe' -ArgumentList @(
     'advfirewall', 'export', (Join-Path $backupPath 'firewall.wfw')
   ) | Out-Null
@@ -728,7 +750,10 @@ Unregister-ScheduledTask -TaskName 'VpsSecurityBootstrap-Telegram-RdpLogin-Clean
 Get-NetFirewallRule -Group 'VpsSecurityBootstrap' -ErrorAction SilentlyContinue |
   Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
-Invoke-RestoreNative 'reg.exe' @('import', (Join-Path $backupPath 'terminal-server.reg'))
+$terminalServerRegistry = Join-Path $backupPath 'terminal-server.reg'
+if (Test-Path -LiteralPath $terminalServerRegistry) {
+  Invoke-RestoreNative 'reg.exe' @('import', $terminalServerRegistry)
+}
 $remoteAssistanceRegistry = Join-Path $backupPath 'remote-assistance.reg'
 $remoteAssistanceMissing = Join-Path $backupPath 'remote-assistance.missing'
 if (Test-Path -LiteralPath $remoteAssistanceRegistry) {
