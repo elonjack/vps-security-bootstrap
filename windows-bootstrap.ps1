@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.17'
+$script:ScriptVersion = 'v1.3.18'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -305,6 +305,130 @@ function Assert-TelegramSetting {
   }
 }
 
+function Get-TelegramApiFailureMessage {
+  param([Parameter(Mandatory)][object]$ErrorRecord)
+
+  $statusCode = $null
+  $description = ''
+  $response = $null
+  if ($ErrorRecord.Exception.PSObject.Properties.Name -contains 'Response') {
+    $response = $ErrorRecord.Exception.Response
+  }
+  if ($response) {
+    try { $statusCode = [int]$response.StatusCode } catch { $statusCode = $null }
+  }
+
+  $payloads = [Collections.Generic.List[string]]::new()
+  if ($ErrorRecord.ErrorDetails -and $ErrorRecord.ErrorDetails.Message) {
+    $payloads.Add([string]$ErrorRecord.ErrorDetails.Message)
+  }
+  if ($response) {
+    try {
+      $stream = $response.GetResponseStream()
+      if ($stream) {
+        $reader = [IO.StreamReader]::new($stream)
+        try {
+          $payloads.Add($reader.ReadToEnd())
+        } finally {
+          $reader.Dispose()
+        }
+      }
+    } catch {
+      Write-Verbose '无法读取 Telegram API 错误响应正文。'
+    }
+  }
+
+  foreach ($payload in $payloads) {
+    if ([string]::IsNullOrWhiteSpace($payload)) { continue }
+    try {
+      $errorResponse = $payload | ConvertFrom-Json -ErrorAction Stop
+      if ($errorResponse.description) {
+        $description = [string]$errorResponse.description
+        if (-not $statusCode -and $errorResponse.error_code) {
+          $statusCode = [int]$errorResponse.error_code
+        }
+        break
+      }
+    } catch {
+      Write-Verbose 'Telegram API 错误响应不是可识别的 JSON。'
+    }
+  }
+
+  if ($statusCode -eq 401 -or $description -match '(?i)unauthorized') {
+    return 'Bot Token 被 Telegram 拒绝（401 Unauthorized）；请从 BotFather 重新复制完整 Token。'
+  }
+  if ($description -match '(?i)chat not found') {
+    return 'Telegram 找不到这个 Chat ID；请先在 Telegram 中打开机器人并发送 /start，再核对 Chat ID。'
+  }
+  if ($statusCode -eq 403 -or $description -match '(?i)bot was blocked|forbidden') {
+    return '机器人无权向该会话发消息（403 Forbidden）；请解除屏蔽并向机器人发送 /start。'
+  }
+  if ($statusCode -eq 429) {
+    return 'Telegram API 请求过于频繁（429）；请稍后重试。'
+  }
+  if ($description) {
+    return "Telegram API 返回错误$(if ($statusCode) { " $statusCode" })：$description"
+  }
+
+  if ($ErrorRecord.Exception -is [Net.WebException]) {
+    switch ($ErrorRecord.Exception.Status) {
+      'NameResolutionFailure' { return '无法解析 api.telegram.org（DNS 失败）；请检查 VPS 的 DNS 和网络。' }
+      'ConnectFailure' { return '无法连接 api.telegram.org；请检查 VPS 出站网络、防火墙或地区网络限制。' }
+      'Timeout' { return '连接 Telegram API 超时；请检查 VPS 出站网络。' }
+      'TrustFailure' { return 'Telegram API TLS 证书验证失败；请检查系统时间和根证书。' }
+    }
+  }
+  return '无法连接 Telegram API；请检查 VPS 出站网络、DNS 和 TLS。'
+}
+
+function Invoke-TelegramApiRequest {
+  param(
+    [Parameter(Mandatory)][string]$Token,
+    [Parameter(Mandatory)][ValidateSet('getMe', 'sendMessage')][string]$ApiMethod,
+    [hashtable]$Body
+  )
+
+  $requestParameters = @{
+    Uri = "https://api.telegram.org/bot$Token/$ApiMethod"
+    Method = 'Post'
+    ContentType = 'application/x-www-form-urlencoded'
+    TimeoutSec = 10
+    ErrorAction = 'Stop'
+  }
+  if ($Body) { $requestParameters.Body = $Body }
+
+  try {
+    $response = Invoke-RestMethod @requestParameters
+  } catch {
+    Write-TerminatingError (Get-TelegramApiFailureMessage -ErrorRecord $_)
+  }
+  if ($null -eq $response -or -not $response.ok) {
+    Write-TerminatingError "Telegram API 的 $ApiMethod 请求未返回成功状态。"
+  }
+  return $response
+}
+
+function Test-TelegramConfiguration {
+  param([Parameter(Mandatory)][object]$Configuration)
+
+  Assert-TelegramSetting `
+    -Token ([string]$Configuration.token) `
+    -ChatId ([string]$Configuration.chatId) `
+    -VpsName ([string]$Configuration.vpsName)
+  Invoke-TelegramApiRequest `
+    -Token ([string]$Configuration.token) `
+    -ApiMethod getMe | Out-Null
+  Invoke-TelegramApiRequest `
+    -Token ([string]$Configuration.token) `
+    -ApiMethod sendMessage `
+    -Body @{
+      chat_id = [string]$Configuration.chatId
+      text = "Windows 安全防护 Telegram 预检成功。`nVPS：$([string]$Configuration.vpsName)"
+      disable_web_page_preview = 'true'
+      protect_content = 'true'
+    } | Out-Null
+}
+
 function Get-ExistingTelegramConfiguration {
   if (-not (Test-Path -LiteralPath $script:TelegramConfigPath)) { return $null }
   try {
@@ -381,6 +505,36 @@ function Get-DesiredTelegramConfiguration {
     Enabled = $true
     Configuration = [pscustomobject]@{ token = $token; chatId = $chatId; vpsName = $vpsName }
   }
+}
+
+function Confirm-TelegramConfiguration {
+  param(
+    [Parameter(Mandatory)][object]$Telegram,
+    [switch]$RotateOnly
+  )
+
+  while ($Telegram.Enabled) {
+    try {
+      Test-TelegramConfiguration -Configuration $Telegram.Configuration
+      Write-Success 'Telegram Bot Token 和 Chat ID 预检通过，测试消息已发送'
+      return $Telegram
+    } catch {
+      Write-ColorLine -Text "Telegram 预检失败：$($_.Exception.Message)" -Color Red
+      if ($NonInteractive) {
+        Write-TerminatingError "Telegram 预检失败：$($_.Exception.Message)"
+      }
+      if (Read-YesNo -Prompt '重新输入 Telegram Token 和 Chat ID 吗？' -Default Y) {
+        $Telegram = Get-DesiredTelegramConfiguration -RotateOnly
+        continue
+      }
+      if ($RotateOnly) {
+        Write-TerminatingError 'Telegram 配置未更新；RDP、端口、防火墙和账户策略均未修改。'
+      }
+      Write-WarningLine '已跳过 Telegram，继续应用其余 Windows RDP 安全防护。'
+      return [pscustomobject]@{ Enabled = $false; Configuration = $null }
+    }
+  }
+  return $Telegram
 }
 
 function Get-CurrentRdpPort {
@@ -1082,7 +1236,6 @@ function Install-TelegramNotification {
       chatId = [string]$Configuration.chatId
       vpsName = [string]$Configuration.vpsName
     } | ConvertTo-Json | Set-Content -LiteralPath $temporaryConfig -Encoding UTF8
-    & $script:TelegramNotifierPath -NotificationType Test -ConfigPath $temporaryConfig | Out-Null
     Move-Item -LiteralPath $temporaryConfig -Destination $script:TelegramConfigPath -Force
   } finally {
     Remove-Item -LiteralPath $temporaryConfig -Force -ErrorAction SilentlyContinue
@@ -1721,6 +1874,7 @@ function Invoke-Apply {
     }
   }
 
+  $telegram = Confirm-TelegramConfiguration -Telegram $telegram
   $backupPath = Save-SecurityBackup
   try {
     if ($telegram.Enabled) {
@@ -1783,6 +1937,7 @@ function Invoke-TelegramConfiguration {
     }
   }
 
+  $telegram = Confirm-TelegramConfiguration -Telegram $telegram -RotateOnly
   $backupPath = Save-SecurityBackup
   try {
     if ($telegram.Enabled) {

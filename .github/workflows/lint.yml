@@ -218,6 +218,133 @@ jobs:
               $emptyTelegramTokenError.Exception -is [System.Management.Automation.ParameterBindingException]) {
             throw 'An empty Telegram Token must be rejected by the explicit validator, not parameter binding.'
           }
+          function New-CiTelegramErrorRecord {
+            param([string]$Payload)
+            $record = [Management.Automation.ErrorRecord]::new(
+              [Exception]::new('redacted'),
+              'CI',
+              [Management.Automation.ErrorCategory]::InvalidResult,
+              $null
+            )
+            $record.ErrorDetails = [Management.Automation.ErrorDetails]::new($Payload)
+            return $record
+          }
+          $unauthorizedMessage = Get-TelegramApiFailureMessage -ErrorRecord (
+            New-CiTelegramErrorRecord '{"ok":false,"error_code":401,"description":"Unauthorized"}'
+          )
+          $chatMissingMessage = Get-TelegramApiFailureMessage -ErrorRecord (
+            New-CiTelegramErrorRecord '{"ok":false,"error_code":400,"description":"Bad Request: chat not found"}'
+          )
+          $blockedMessage = Get-TelegramApiFailureMessage -ErrorRecord (
+            New-CiTelegramErrorRecord '{"ok":false,"error_code":403,"description":"Forbidden: bot was blocked by the user"}'
+          )
+          if ($unauthorizedMessage -notmatch 'Token' -or
+              $chatMissingMessage -notmatch '/start' -or
+              $blockedMessage -notmatch '403 Forbidden') {
+            throw 'Telegram API errors must provide specific, actionable diagnostics.'
+          }
+          $originalInvokeRestFunction = Get-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+          $originalReadYesNoForTelegram = ${function:Read-YesNo}
+          $script:telegramMockMethods = [Collections.Generic.List[string]]::new()
+          function Invoke-RestMethod {
+            [CmdletBinding()]
+            param(
+              [string]$Uri,
+              [string]$Method,
+              [hashtable]$Body,
+              [string]$ContentType,
+              [int]$TimeoutSec
+            )
+            $script:telegramMockMethods.Add(($Uri -split '/')[-1])
+            return [pscustomobject]@{ ok = $true }
+          }
+          $telegramCiConfiguration = [pscustomobject]@{
+            token = '123456789:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd'
+            chatId = '123456789'
+            vpsName = 'CI-Windows'
+          }
+          try {
+            Test-TelegramConfiguration -Configuration $telegramCiConfiguration
+            if (($script:telegramMockMethods -join ',') -ne 'getMe,sendMessage') {
+              throw 'Telegram preflight must validate the Token before testing the Chat ID.'
+            }
+            function Invoke-RestMethod {
+              [CmdletBinding()]
+              param(
+                [string]$Uri,
+                [string]$Method,
+                [hashtable]$Body,
+                [string]$ContentType,
+                [int]$TimeoutSec
+              )
+              throw [Net.WebException]::new(
+                'CI DNS failure',
+                [Net.WebExceptionStatus]::NameResolutionFailure
+              )
+            }
+            $networkFailure = ''
+            try {
+              Test-TelegramConfiguration -Configuration $telegramCiConfiguration
+            } catch {
+              $networkFailure = $_.Exception.Message
+            }
+            if ($networkFailure -notmatch 'DNS' -or
+                $networkFailure -match [regex]::Escape($telegramCiConfiguration.token)) {
+              throw 'Telegram network errors must be specific and must not disclose the Token.'
+            }
+            function Read-YesNo { param([string]$Prompt, [string]$Default) return $false }
+            $resolvedTelegram = Confirm-TelegramConfiguration -Telegram ([pscustomobject]@{
+              Enabled = $true
+              Configuration = $telegramCiConfiguration
+            })
+            if ($resolvedTelegram.Enabled) {
+              throw 'Interactive Apply must allow Telegram to be skipped after a failed preflight.'
+            }
+          } finally {
+            if ($originalInvokeRestFunction) {
+              Set-Item Function:\Invoke-RestMethod -Value $originalInvokeRestFunction.ScriptBlock
+            } else {
+              Remove-Item Function:\Invoke-RestMethod -ErrorAction SilentlyContinue
+            }
+            Set-Item Function:\Read-YesNo -Value $originalReadYesNoForTelegram
+            Remove-Variable telegramMockMethods -Scope Script -ErrorAction SilentlyContinue
+          }
+          $originalTelegramPreflight = ${function:Test-TelegramConfiguration}
+          $originalReadYesNoForRetry = ${function:Read-YesNo}
+          $originalGetDesiredForRetry = ${function:Get-DesiredTelegramConfiguration}
+          $script:telegramPreflightAttempts = 0
+          function Test-TelegramConfiguration {
+            param([object]$Configuration)
+            $script:telegramPreflightAttempts++
+            if ($script:telegramPreflightAttempts -eq 1) { throw 'CI first attempt failed' }
+          }
+          function Read-YesNo { param([string]$Prompt, [string]$Default) return $true }
+          function Get-DesiredTelegramConfiguration {
+            param([switch]$RotateOnly)
+            return [pscustomobject]@{
+              Enabled = $true
+              Configuration = [pscustomobject]@{
+                token = '222222222:ABCDEFGHIJKLMNOPQRSTUVWXYZ_abcd'
+                chatId = '222'
+                vpsName = 'CI-Retried'
+              }
+            }
+          }
+          try {
+            $retriedTelegram = Confirm-TelegramConfiguration -Telegram ([pscustomobject]@{
+              Enabled = $true
+              Configuration = $telegramCiConfiguration
+            })
+            if ($script:telegramPreflightAttempts -ne 2 -or
+                $retriedTelegram.Configuration.vpsName -ne 'CI-Retried') {
+              throw 'Interactive Telegram preflight must retry with newly entered credentials.'
+            }
+          } finally {
+            Set-Item Function:\Test-TelegramConfiguration -Value $originalTelegramPreflight
+            Set-Item Function:\Read-YesNo -Value $originalReadYesNoForRetry
+            Set-Item Function:\Get-DesiredTelegramConfiguration -Value $originalGetDesiredForRetry
+            Remove-Variable telegramPreflightAttempts -Scope Script -ErrorAction SilentlyContinue
+          }
           $originalReadSecret = ${function:Read-Secret}
           $originalReadDefault = ${function:Read-Default}
           $tokenInputs = [Collections.Generic.Queue[string]]::new()
