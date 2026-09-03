@@ -448,6 +448,17 @@ jobs:
             Remove-Item -LiteralPath $registryBackupTestRoot -Recurse -Force -ErrorAction SilentlyContinue
           }
 
+          # The actual binding tests above prove empty collections are accepted.
+          # This audit ensures Invoke-Apply keeps forwarding that exact collection
+          # from the interactive configuration into both protected components.
+          $applyDefinition = (Get-Command Invoke-Apply).ScriptBlock.ToString()
+          if ($applyDefinition -notmatch '\$configuration\.RemoteAddresses' -or
+              $applyDefinition -notmatch '(?s)Set-RdpFirewallRule.*?-RemoteAddresses\s+\$remoteAddresses' -or
+              $applyDefinition -notmatch '(?s)Install-RdpGuard.*?-TrustedAddresses\s+\$remoteAddresses' -or
+              $applyDefinition -notmatch 'ConvertTo-RemoteAddressList\s+-InputValue\s+\$AllowedRemoteAddress') {
+            throw 'Invoke-Apply must forward the Any-source address collection to both the firewall and RDP Guard.'
+          }
+
           $versionMatch = Select-String -Path $path -Pattern "ScriptVersion = '(v[^']+)'"
           if (-not $versionMatch) { throw 'Windows script version is missing.' }
           $version = $versionMatch.Matches[0].Groups[1].Value
