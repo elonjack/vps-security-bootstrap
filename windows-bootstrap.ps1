@@ -40,7 +40,7 @@
 )]
 [CmdletBinding()]
 param(
-  [ValidateSet('Menu', 'Apply', 'Status', 'Telegram', 'WindowsUpdate')]
+  [ValidateSet('Menu', 'Apply', 'Status', 'Telegram', 'WindowsUpdate', 'Guard')]
   [string]$Action = 'Menu',
 
   [ValidateRange(1024, 65535)]
@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.3.21'
+$script:ScriptVersion = 'v1.4.0'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1293,6 +1293,43 @@ function Remove-TelegramNotification {
   }
 }
 
+function Get-RdpGuardEscalationPolicy {
+  param([ValidateRange(1, 10080)][int]$InitialBanMinutes = 1440)
+
+  $durations = [int[]](
+    $InitialBanMinutes,
+    ($InitialBanMinutes * 3),
+    ($InitialBanMinutes * 7),
+    ($InitialBanMinutes * 30)
+  )
+  return [pscustomobject]@{
+    OffenseWindowDays = 30
+    BanDurationsMinutes = $durations
+    PermanentAfter = 5
+  }
+}
+
+function Get-RdpGuardEscalationSummary {
+  param([Parameter(Mandatory)][object]$Policy)
+
+  $labels = @($Policy.BanDurationsMinutes | ForEach-Object {
+    if ($_ % 1440 -eq 0) { "$($_ / 1440) 天" } else { "$_ 分钟" }
+  })
+  return "30 天内第 1–4 次依次封禁 $($labels -join '、')；第 $($Policy.PermanentAfter) 次永久封禁"
+}
+
+function Get-RdpGuardRuleSuffix {
+  param([Parameter(Mandatory)][string]$Address)
+
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try {
+    $bytes = [Text.Encoding]::UTF8.GetBytes($Address)
+    return ([BitConverter]::ToString($sha.ComputeHash($bytes))).Replace('-', '').Substring(0, 16)
+  } finally {
+    $sha.Dispose()
+  }
+}
+
 function Get-RdpGuardSource {
   return @'
 #requires -Version 5.1
@@ -1368,9 +1405,10 @@ function Get-RuleSuffix {
 }
 
 function Save-State {
-  param([hashtable]$Bans)
+  param([hashtable]$Bans, [hashtable]$Offenses)
   $tempPath = "$statePath.tmp"
-  [ordered]@{ bans = $Bans } | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath $tempPath -Encoding UTF8
+  [ordered]@{ bans = $Bans; offenses = $Offenses } |
+    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempPath -Encoding UTF8
   Move-Item -LiteralPath $tempPath -Destination $statePath -Force
 }
 
@@ -1385,20 +1423,75 @@ try {
   }
   $now = Get-Date
   $bans = @{}
+  $offenses = @{}
+  $offenseWindowDays = if ($config.PSObject.Properties.Name -contains 'offenseWindowDays') {
+    [int]$config.offenseWindowDays
+  } else { 30 }
+  $permanentAfter = if ($config.PSObject.Properties.Name -contains 'permanentAfter') {
+    [int]$config.permanentAfter
+  } else { 5 }
+  $banDurations = if ($config.PSObject.Properties.Name -contains 'banDurationsMinutes') {
+    @($config.banDurationsMinutes | ForEach-Object { [int]$_ })
+  } else {
+    @([int]$config.banMinutes, [int]$config.banMinutes * 3, [int]$config.banMinutes * 7, [int]$config.banMinutes * 30)
+  }
+  if ($offenseWindowDays -lt 1 -or $permanentAfter -lt 2 -or $banDurations.Count -eq 0 -or
+    ($banDurations | Where-Object { $_ -lt 1 })) {
+    throw 'RDP Guard 阶梯封禁配置无效。'
+  }
 
   if (Test-Path -LiteralPath $statePath) {
     try {
       $saved = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
-      foreach ($property in $saved.bans.PSObject.Properties) {
-        $bans[$property.Name] = [string]$property.Value
+      if ($saved.PSObject.Properties.Name -contains 'bans' -and $saved.bans) {
+        foreach ($property in $saved.bans.PSObject.Properties) {
+          # v1.3.x stored an expiry string directly. Keep it readable and
+          # upgrade it on the next state write.
+          if ($property.Value -is [string]) {
+            $bans[$property.Name] = @{ permanent = $false; expiresAt = [string]$property.Value; offenseCount = 1 }
+            continue
+          }
+          $record = $property.Value
+          $permanent = $record.PSObject.Properties.Name -contains 'permanent' -and [bool]$record.permanent
+          $expiresAt = if ($record.PSObject.Properties.Name -contains 'expiresAt') { [string]$record.expiresAt } else { '' }
+          $offenseCount = if ($record.PSObject.Properties.Name -contains 'offenseCount') { [int]$record.offenseCount } else { 1 }
+          $bans[$property.Name] = @{ permanent = $permanent; expiresAt = $expiresAt; offenseCount = $offenseCount }
+        }
+      }
+      if ($saved.PSObject.Properties.Name -contains 'offenses' -and $saved.offenses) {
+        foreach ($property in $saved.offenses.PSObject.Properties) {
+          $record = $property.Value
+          if ($record.PSObject.Properties.Name -contains 'count' -and
+            $record.PSObject.Properties.Name -contains 'lastBanAt') {
+            $offenses[$property.Name] = @{ count = [int]$record.count; lastBanAt = [string]$record.lastBanAt }
+          }
+        }
       }
     } catch {
       Write-GuardLog "忽略损坏的状态文件：$($_.Exception.Message)"
     }
   }
 
+  foreach ($address in @($offenses.Keys)) {
+    try {
+      if ([datetime]$offenses[$address].lastBanAt -le $now.AddDays(-$offenseWindowDays)) {
+        $offenses.Remove($address)
+        Write-GuardLog "阶梯封禁计数已衰减重置：$address"
+      }
+    } catch {
+      $offenses.Remove($address)
+      Write-GuardLog "移除无效的阶梯封禁计数：$address"
+    }
+  }
+
   foreach ($address in @($bans.Keys)) {
-    if ([datetime]$bans[$address] -le $now) {
+    if ([bool]$bans[$address].permanent) { continue }
+    try { $expires = [datetime]$bans[$address].expiresAt } catch {
+      $bans.Remove($address)
+      Write-GuardLog "移除无效的封禁记录：$address"
+      continue
+    }
+    if ($expires -le $now) {
       $suffix = Get-RuleSuffix -Address $address
       Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
         Remove-NetFirewallRule -ErrorAction SilentlyContinue
@@ -1446,8 +1539,18 @@ try {
 
   foreach ($address in $counts.Keys) {
     if ($counts[$address] -lt [int]$config.threshold) { continue }
-    if ($bans.ContainsKey($address) -and [datetime]$bans[$address] -gt $now) { continue }
-    $expires = $now.AddMinutes([int]$config.banMinutes)
+    if ($bans.ContainsKey($address)) { continue }
+    $previousOffenses = 0
+    if ($offenses.ContainsKey($address)) {
+      $previousOffenses = [int]$offenses[$address].count
+    }
+    $offenseCount = $previousOffenses + 1
+    $isPermanent = $offenseCount -ge $permanentAfter
+    $expires = $null
+    if (-not $isPermanent) {
+      $durationIndex = [Math]::Min($offenseCount - 1, $banDurations.Count - 1)
+      $expires = $now.AddMinutes([int]$banDurations[$durationIndex])
+    }
     $suffix = Get-RuleSuffix -Address $address
 
     Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
@@ -1465,8 +1568,14 @@ try {
         -LocalPort $protectedPorts `
         -RemoteAddress $address | Out-Null
     }
-    $bans[$address] = $expires.ToString('o')
-    Write-GuardLog "封禁：$address；失败次数：$($counts[$address])；到期：$($expires.ToString('o'))"
+    $offenses[$address] = @{ count = $offenseCount; lastBanAt = $now.ToString('o') }
+    $bans[$address] = @{
+      permanent = $isPermanent
+      expiresAt = if ($isPermanent) { $null } else { $expires.ToString('o') }
+      offenseCount = $offenseCount
+    }
+    $banUntil = if ($isPermanent) { '永久' } else { $expires.ToString('o') }
+    Write-GuardLog "封禁：$address；失败次数：$($counts[$address])；30 天内第 $offenseCount 次；期限：$banUntil"
     if (Test-Path -LiteralPath $notifierPath) {
       try {
         & $notifierPath `
@@ -1474,14 +1583,14 @@ try {
           -Address $address `
           -Port ([int]$config.rdpPort) `
           -FailureCount ([int]$counts[$address]) `
-          -BanUntil $expires.ToString('o') | Out-Null
+          -BanUntil $banUntil | Out-Null
       } catch {
         Write-GuardLog "Telegram 封禁通知失败：$($_.Exception.Message)"
       }
     }
   }
 
-  Save-State -Bans $bans
+  Save-State -Bans $bans -Offenses $offenses
 } catch {
   Write-GuardLog "运行失败：$($_.Exception.Message)"
   exit 1
@@ -1507,6 +1616,7 @@ function Install-RdpGuard {
   Write-Title '安装事件驱动的 RDP Guard'
   Protect-DataDirectory
   Set-Content -LiteralPath $script:GuardPath -Value (Get-RdpGuardSource) -Encoding UTF8
+  $policy = Get-RdpGuardEscalationPolicy -InitialBanMinutes $BlockMinutes
 
   $config = [ordered]@{
     rdpPort = $Port
@@ -1515,6 +1625,9 @@ function Install-RdpGuard {
     threshold = $Threshold
     windowMinutes = $WindowMinutes
     banMinutes = $BlockMinutes
+    offenseWindowDays = $policy.OffenseWindowDays
+    banDurationsMinutes = @($policy.BanDurationsMinutes)
+    permanentAfter = $policy.PermanentAfter
   }
   $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $script:GuardConfigPath -Encoding UTF8
 
@@ -1545,7 +1658,7 @@ function Install-RdpGuard {
   Set-ScheduledTask -TaskName $script:GuardTaskName -Settings $taskSettings | Out-Null
   Set-ScheduledTask -TaskName $script:GuardCleanupTaskName -Settings $taskSettings | Out-Null
 
-  Write-Success "RDP Guard 已启用：$WindowMinutes 分钟内失败 $Threshold 次，封禁 $BlockMinutes 分钟"
+  Write-Success "RDP Guard 已启用：$WindowMinutes 分钟内失败 $Threshold 次；$(Get-RdpGuardEscalationSummary -Policy $policy)"
 }
 
 function Remove-RdpGuard {
@@ -1738,6 +1851,103 @@ function Invoke-WindowsUpdateControl {
   }
 }
 
+function Get-RdpGuardBanStatus {
+  if (-not (Test-Path -LiteralPath $script:GuardStatePath)) { return @() }
+  try {
+    $state = Get-Content -LiteralPath $script:GuardStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if (-not ($state.PSObject.Properties.Name -contains 'bans') -or -not $state.bans) { return @() }
+    return @($state.bans.PSObject.Properties | ForEach-Object {
+      $record = $_.Value
+      $permanent = $false
+      $expiresAt = ''
+      $offenseCount = 1
+      if ($record -is [string]) {
+        $expiresAt = [string]$record
+      } else {
+        if ($record.PSObject.Properties.Name -contains 'permanent') { $permanent = [bool]$record.permanent }
+        if ($record.PSObject.Properties.Name -contains 'expiresAt' -and $record.expiresAt) { $expiresAt = [string]$record.expiresAt }
+        if ($record.PSObject.Properties.Name -contains 'offenseCount') { $offenseCount = [int]$record.offenseCount }
+      }
+      [pscustomobject]@{
+        Address = $_.Name
+        Status = if ($permanent) { '永久封禁' } else { '临时封禁' }
+        OffenseCount = $offenseCount
+        ExpiresAt = if ($permanent) { '永久' } elseif ($expiresAt) { $expiresAt } else { '未知' }
+      }
+    })
+  } catch {
+    Write-WarningLine "无法读取 RDP Guard 封禁状态：$($_.Exception.Message)"
+    return @()
+  }
+}
+
+function Show-RdpGuardBanStatus {
+  $bans = @(Get-RdpGuardBanStatus)
+  Write-Output 'RDP Guard 当前封禁：'
+  if ($bans.Count -eq 0) {
+    Write-Output '  无'
+  } else {
+    $bans | Sort-Object Status, Address | Format-Table Address, Status, OffenseCount, ExpiresAt -AutoSize
+  }
+}
+
+function Remove-RdpGuardBan {
+  [CmdletBinding(SupportsShouldProcess)]
+  param([Parameter(Mandatory)][string]$Address)
+
+  $parsedAddress = $null
+  if ($Address.Contains('/') -or -not [Net.IPAddress]::TryParse($Address, [ref]$parsedAddress)) {
+    Write-TerminatingError '手动解封必须填写单个有效 IPv4 或 IPv6 地址，不能填写 CIDR。'
+  }
+  $canonicalAddress = $parsedAddress.ToString()
+  if (-not $PSCmdlet.ShouldProcess($canonicalAddress, '解除 RDP Guard 封禁并清除其阶梯计数')) { return }
+
+  $suffix = Get-RdpGuardRuleSuffix -Address $canonicalAddress
+  Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
+    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+
+  if (Test-Path -LiteralPath $script:GuardStatePath) {
+    $state = Get-Content -LiteralPath $script:GuardStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+    if ($state.PSObject.Properties.Name -contains 'bans' -and $state.bans) {
+      $state.bans.PSObject.Properties.Remove($canonicalAddress)
+    }
+    if ($state.PSObject.Properties.Name -contains 'offenses' -and $state.offenses) {
+      $state.offenses.PSObject.Properties.Remove($canonicalAddress)
+    }
+    $temporary = "$($script:GuardStatePath).tmp"
+    try {
+      $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8
+      Move-Item -LiteralPath $temporary -Destination $script:GuardStatePath -Force
+    } finally {
+      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+    }
+  }
+  Write-Success "已解除 $canonicalAddress 的 RDP Guard 封禁，并清除其阶梯封禁计数"
+}
+
+function Invoke-RdpGuardManagement {
+  Assert-SupportedWindows
+  while ($true) {
+    Write-Title 'RDP Guard 封禁管理'
+    Show-RdpGuardBanStatus
+    Write-Output '  1. 刷新封禁状态'
+    Write-Output '  2. 手动解除指定 IP 的封禁并清除计数'
+    Write-Output '  0. 返回主菜单'
+    switch (Read-Default -Prompt '请选择操作' -Default '1') {
+      '1' { continue }
+      '2' {
+        $address = Read-Default -Prompt '要解除封禁的单个 IP' -Default ''
+        if ([string]::IsNullOrWhiteSpace($address)) { Write-Info '已取消解封。'; continue }
+        if (Read-YesNo -Prompt "确认解除 $address 的封禁并清除其阶梯计数吗？" -Default N) {
+          Remove-RdpGuardBan -Address $address
+        }
+      }
+      '0' { return }
+      default { Write-ColorLine -Text '无效选项。' -Color Red }
+    }
+  }
+}
+
 function Show-SecurityStatus {
   Assert-SupportedWindows
   $currentVersion = Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion'
@@ -1765,6 +1975,7 @@ function Show-SecurityStatus {
   $profiles | Format-Table -AutoSize
   Write-Output '本脚本管理的规则：'
   if ($rules) { $rules | Format-Table -AutoSize } else { Write-Output '  无' }
+  Show-RdpGuardBanStatus
   Write-Output '账户策略：'
   & net.exe accounts
 }
@@ -1865,7 +2076,8 @@ function Invoke-Apply {
     Write-Output "允许来源：$(if ($remoteAddresses.Count) { $remoteAddresses -join ', ' } else { 'Any' })"
     Write-Output "NLA/TLS/高加密：启用"
     Write-Output "Windows 防火墙：全部配置文件启用，默认阻止入站"
-    Write-Output "RDP Guard：$(if ($useGuard) { "$BanWindowMinutes 分钟失败 $BanThreshold 次，封禁 $BanMinutes 分钟" } else { '不启用' })"
+    $guardPolicy = Get-RdpGuardEscalationPolicy -InitialBanMinutes $BanMinutes
+    Write-Output "RDP Guard：$(if ($useGuard) { "$BanWindowMinutes 分钟失败 $BanThreshold 次；$(Get-RdpGuardEscalationSummary -Policy $guardPolicy)" } else { '不启用' })"
     Write-Output "账户锁定策略：$(if ($setAccountPolicy) { '10 次 / 15 分钟' } else { '保持现状' })"
     Write-Output "Telegram：$(if ($telegram.Enabled) { '登录、封禁、解封通知已选择' } else { '不启用' })"
     Write-Output '自动重启：否'
@@ -1964,6 +2176,7 @@ function Show-MainMenu {
   Write-ColorLine -Text '  2. 查看当前 Windows 11 安全状态' -Color Yellow
   Write-ColorLine -Text '  3. 更换 Telegram Bot Token 或通知目标' -Color Yellow
   Write-ColorLine -Text '  4. Windows Update 自动更新控制（适合小磁盘 VPS）' -Color Yellow
+  Write-ColorLine -Text '  5. RDP Guard 封禁状态和手动解封' -Color Yellow
   Write-ColorLine -Text '  0. 退出' -Color Yellow
   return Read-Default -Prompt '请选择操作' -Default '1'
 }
@@ -1977,6 +2190,7 @@ if ($MyInvocation.InvocationName -ne '.') {
         '2' { $Action = 'Status' }
         '3' { $Action = 'Telegram' }
         '4' { $Action = 'WindowsUpdate' }
+        '5' { $Action = 'Guard' }
         '0' { Write-Info '已退出，系统未被修改。'; exit 0 }
         default { Write-TerminatingError '无效选项。' }
       }
@@ -1987,6 +2201,7 @@ if ($MyInvocation.InvocationName -ne '.') {
       'Status' { Show-SecurityStatus }
       'Telegram' { Invoke-TelegramConfiguration }
       'WindowsUpdate' { Invoke-WindowsUpdateControl }
+      'Guard' { Invoke-RdpGuardManagement }
     }
   } catch {
     Write-ColorLine -Text "错误：$($_.Exception.Message)" -Color Red

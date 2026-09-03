@@ -398,6 +398,34 @@ jobs:
           if ((Get-RdpGuardSource) -notmatch "LogonType -ne '10'") {
             throw 'RDP Guard must only count RemoteInteractive (RDP) failures by default.'
           }
+          $guardPolicy = Get-RdpGuardEscalationPolicy
+          if ($guardPolicy.OffenseWindowDays -ne 30 -or
+              $guardPolicy.PermanentAfter -ne 5 -or
+              ($guardPolicy.BanDurationsMinutes -join ',') -ne '1440,4320,10080,43200') {
+            throw 'RDP Guard must use the documented 30-day escalating ban policy.'
+          }
+          $guardSource = Get-RdpGuardSource
+          foreach ($requiredGuardFeature in @(
+            'offenses',
+            'offenseWindowDays',
+            'banDurationsMinutes',
+            'permanentAfter',
+            "if ([bool]`$bans[`$address].permanent) { continue }"
+          )) {
+            if ($guardSource -notmatch [regex]::Escape($requiredGuardFeature)) {
+              throw "RDP Guard escalation feature is missing: $requiredGuardFeature"
+            }
+          }
+          Remove-RdpGuardBan -Address '203.0.113.10' -WhatIf
+          $invalidUnbanCaught = $false
+          try {
+            Remove-RdpGuardBan -Address '203.0.113.0/24' -WhatIf
+          } catch {
+            $invalidUnbanCaught = $true
+          }
+          if (-not $invalidUnbanCaught) {
+            throw 'RDP Guard manual unban must reject CIDR ranges.'
+          }
           if ((Get-RdpPortCleanupSource) -notmatch 'VpsSecurity-RdpAllow-Current-\*') {
             throw 'The one-time old-port cleanup rule is missing.'
           }
