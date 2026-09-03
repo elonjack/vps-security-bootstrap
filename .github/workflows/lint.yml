@@ -161,10 +161,31 @@ jobs:
             throw 'Local listener enumeration returned an invalid port.'
           }
           $emptyRemoteAddresses = [string[]]@()
+          foreach ($collectionParameter in @(
+            @{ Command = 'Set-RdpFirewallRule'; Parameter = 'RemoteAddresses' },
+            @{ Command = 'Install-RdpGuard'; Parameter = 'TrustedAddresses' }
+          )) {
+            $parameterAttributes = (Get-Command $collectionParameter.Command).Parameters[
+              $collectionParameter.Parameter
+            ].Attributes
+            if (-not ($parameterAttributes | Where-Object {
+              $_ -is [Management.Automation.AllowEmptyCollectionAttribute]
+            })) {
+              throw "$($collectionParameter.Command) must accept an empty source-address collection for Any."
+            }
+          }
           Set-RdpFirewallRule `
             -Port 50000 `
             -CurrentPort 3389 `
             -RemoteAddresses $emptyRemoteAddresses `
+            -WhatIf
+          Install-RdpGuard `
+            -Port 50000 `
+            -ProtectedPorts @(3389, 50000) `
+            -TrustedAddresses $emptyRemoteAddresses `
+            -Threshold 5 `
+            -WindowMinutes 5 `
+            -BlockMinutes 1440 `
             -WhatIf
           foreach ($source in @(
             (Get-RdpGuardSource),
