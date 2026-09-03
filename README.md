@@ -121,6 +121,7 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | `2. 查看当前 Windows 11 安全状态` | 显示 RDP 端口、NLA、防火墙、RDP Guard、Telegram 与自动更新状态。 | 只读，不修改系统。 |
 | `3. 更换 Telegram Bot Token 或通知目标` | 更新 RDP 登录、封禁、解封通知的 Token、Chat ID 与 VPS 名称。 | 不修改 RDP、端口、防火墙或账户策略。 |
 | `4. Windows Update 自动更新控制` | 查看、禁用或恢复 Windows 自动更新。 | 适合磁盘很小的 VPS；禁用更新会降低安全性，应自行安排手动更新。 |
+| `5. RDP Guard 封禁状态和手动解封` | 查看临时/永久封禁的 IP；可手动解除指定 IP 的封禁并清除其升级计数。 | 解封仅接受单个 IPv4 或 IPv6 地址，不接受 CIDR；会立即移除该 IP 的 RDP 封禁规则。 |
 | `0. 退出` | 不做任何修改。 | — |
 
 选择 `1` 后，各项配置的作用如下：
@@ -131,7 +132,7 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | 来源白名单 | 填固定公网 IP/CIDR 后，只有这些来源能访问 RDP；动态 IP 请选 `Any`。 |
 | NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。 |
 | Windows 防火墙 | 启用全部配置文件并默认拒绝入站，只允许配置的 RDP TCP/UDP 端口和来源。 |
-| RDP Guard | 可选。默认同一来源在 5 分钟内发生 5 次 **RDP（RemoteInteractive）** 登录失败时，封禁 1 天；不会因 SMB 等普通网络登录失败而误封 RDP。 |
+| RDP Guard | 可选。默认同一来源在 5 分钟内发生 5 次 **RDP（RemoteInteractive）** 登录失败时，30 天内第 1/2/3/4 次分别封禁 1/3/7/30 天，第 5 次永久封禁；30 天未再触发会重置计数。不会因 SMB 等普通网络登录失败而误封 RDP。 |
 | 账户锁定策略 | 可选。默认连续失败 10 次锁定 15 分钟。 |
 | Telegram | 可选；应用系统修改前会先验证 Bot Token 并发送测试消息验证 Chat ID。失败时会显示具体原因，可重新输入或跳过 Telegram 继续配置 RDP；Token 文件仅允许 `Administrators` 和 `SYSTEM` 访问。 |
 
@@ -147,12 +148,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.3.21`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.0`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.3.21
+version=v1.4.0
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -163,7 +164,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.3.21'
+$version = 'v1.4.0'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
