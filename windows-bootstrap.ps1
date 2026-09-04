@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.1'
+$script:ScriptVersion = 'v1.4.2'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1132,19 +1132,19 @@ $delayedLogin = $NotificationType -eq 'Login' -and
 
 switch ($NotificationType) {
   'Test' {
-    $text = "✅ <b>Windows Telegram 通知测试成功</b>`nVPS：$vpsName`n主机：$computerName`n时间：$sentTimeText"
+    $text = "<b>✅ Windows Telegram 通知测试成功</b>`n<b>📌 $vpsName</b>`n━━━━━━━━━━━━`n🖥 主机：<code>$computerName</code>`n🕒 时间：<code>$sentTimeText</code>"
   }
   'Login' {
-    $text = "✅ <b>Windows RDP 登录成功</b>`nVPS：$vpsName`n主机：$computerName`n用户：$safeUser`n来源 IP：$safeAddress`nRDP 端口：$Port`n登录时间：$occurredTimeText"
+    $text = "<b>✅ Windows RDP 登录成功</b>`n<b>📌 $vpsName</b>`n━━━━━━━━━━━━`n🖥 主机：<code>$computerName</code>`n👤 用户：<code>$safeUser</code>`n🌐 来源 IP：<code>$safeAddress</code>`n🔐 RDP 端口：<code>$Port</code>`n🕒 登录时间：<code>$occurredTimeText</code>"
     if ($delayedLogin) {
-      $text += "`n通知发送时间：$sentTimeText（延迟重试）"
+      $text += "`n📨 通知发送时间：<code>$sentTimeText</code>（延迟发送）"
     }
   }
   'Ban' {
-    $text = "⛔ <b>Windows RDP 爆破来源已封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`n失败次数：$FailureCount`nRDP 端口：$Port`n封禁至：$safeUntil`n时间：$sentTimeText"
+    $text = "<b>🚨 Windows RDP 爆破来源已封禁</b>`n<b>📌 $vpsName</b>`n━━━━━━━━━━━━`n🖥 主机：<code>$computerName</code>`n🌐 来源 IP：<code>$safeAddress</code>`n🔁 本次失败次数：<b>$FailureCount</b>`n🔐 RDP 端口：<code>$Port</code>`n⏳ 封禁至：<b>$safeUntil</b>`n🕒 通知时间：<code>$sentTimeText</code>"
   }
   'Unban' {
-    $text = "♻️ <b>Windows RDP 来源已解除封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`nRDP 端口：$Port`n时间：$sentTimeText"
+    $text = "<b>♻️ Windows RDP 来源已解除封禁</b>`n<b>📌 $vpsName</b>`n━━━━━━━━━━━━`n🖥 主机：<code>$computerName</code>`n🌐 来源 IP：<code>$safeAddress</code>`n🔐 RDP 端口：<code>$Port</code>`n🕒 通知时间：<code>$sentTimeText</code>"
   }
 }
 

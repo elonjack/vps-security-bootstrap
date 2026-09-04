@@ -52,11 +52,13 @@ try {
     -Port 44756 `
     -OccurredAt $occurredAt
   $telegramText = [string]$global:ciTelegramBody['text']
-  if ($telegramText -notmatch 'DESKTOP\\Administrator' -or
-      $telegramText -notmatch '198\.51\.100\.4' -or
-      $telegramText -notmatch '44756' -or
-      $telegramText -notmatch '2026-09-03 20:27:48') {
-    throw "Telegram login notification did not preserve the event time: $telegramText"
+  if ($global:ciTelegramBody['parse_mode'] -ne 'HTML' -or
+      $telegramText -notmatch '<b>.*</b>' -or
+      $telegramText -notmatch '<code>DESKTOP\\Administrator</code>' -or
+      $telegramText -notmatch '<code>198\.51\.100\.4</code>' -or
+      $telegramText -notmatch '<code>44756</code>' -or
+      $telegramText -notmatch '<code>2026-09-03 20:27:48') {
+    throw "Telegram login notification did not preserve the event time and structured layout: $telegramText"
   }
 
   $watcherPath = Join-Path $dataRoot 'telegram-rdp-login.ps1'
