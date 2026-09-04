@@ -134,7 +134,7 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | Windows 防火墙 | 启用全部配置文件并默认拒绝入站，只允许配置的 RDP TCP/UDP 端口和来源。 |
 | RDP Guard | 可选。默认同一来源在 5 分钟内发生 5 次 **RDP（RemoteInteractive）** 登录失败时，30 天内第 1/2/3/4 次分别封禁 1/3/7/30 天，第 5 次永久封禁；30 天未再触发会重置计数。不会因 SMB 等普通网络登录失败而误封 RDP。 |
 | 账户锁定策略 | 可选。默认连续失败 10 次锁定 15 分钟。 |
-| Telegram | 可选；应用系统修改前会先验证 Bot Token 并发送测试消息验证 Chat ID。RDP 登录通知包含用户、来源 IP、端口和**安全日志的实际登录时间**；若发送发生延迟重试，会额外标明通知发送时间。封禁/解封通知同样包含来源 IP、端口和通知时间。失败时会显示具体原因，可重新输入或跳过 Telegram 继续配置 RDP；Token 文件仅允许 `Administrators` 和 `SYSTEM` 访问。 |
+| Telegram | 可选；应用系统修改前会先验证 Bot Token 并发送测试消息验证 Chat ID。登录、封禁和解封消息采用带图标的分层格式。RDP 登录通知包含用户、来源 IP、端口和**安全日志的实际登录时间**；若发送延迟超过一分钟，会额外标明通知发送时间。封禁/解封通知同样包含来源 IP、端口和通知时间。失败时会显示具体原因，可重新输入或跳过 Telegram 继续配置 RDP；Token 文件仅允许 `Administrators` 和 `SYSTEM` 访问。 |
 
 选择 `4` 后的子菜单：
 
@@ -148,12 +148,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.4.1`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.2`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.4.1
+version=v1.4.2
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -164,7 +164,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.4.1'
+$version = 'v1.4.2'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
