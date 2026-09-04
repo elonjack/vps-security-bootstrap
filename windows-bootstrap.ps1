@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.0'
+$script:ScriptVersion = 'v1.4.1'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1079,7 +1079,8 @@ param(
   [string]$Address = '-',
   [int]$Port = 0,
   [int]$FailureCount = 0,
-  [string]$BanUntil = '-'
+  [string]$BanUntil = '-',
+  [datetime]$OccurredAt = [datetime]::MinValue
 )
 
 Set-StrictMode -Version Latest
@@ -1092,6 +1093,25 @@ function ConvertTo-HtmlText {
   return [Security.SecurityElement]::Escape($Text)
 }
 
+function Format-NotificationTime {
+  param([Parameter(Mandatory)][datetime]$Timestamp)
+
+  try {
+    $utcTimestamp = if ($Timestamp.Kind -eq [DateTimeKind]::Utc) {
+      $Timestamp
+    } elseif ($Timestamp.Kind -eq [DateTimeKind]::Local) {
+      $Timestamp.ToUniversalTime()
+    } else {
+      [DateTime]::SpecifyKind($Timestamp, [DateTimeKind]::Local).ToUniversalTime()
+    }
+    $chinaZone = [TimeZoneInfo]::FindSystemTimeZoneById('China Standard Time')
+    $chinaTime = [TimeZoneInfo]::ConvertTimeFromUtc($utcTimestamp, $chinaZone)
+    return $chinaTime.ToString('yyyy-MM-dd HH:mm:ss') + ' 北京时间 (UTC+8)'
+  } catch {
+    return $Timestamp.ToUniversalTime().ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+  }
+}
+
 if (-not (Test-Path -LiteralPath $ConfigPath)) { exit 0 }
 $config = Get-Content -LiteralPath $ConfigPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $vpsName = ConvertTo-HtmlText ([string]$config.vpsName)
@@ -1099,25 +1119,32 @@ $computerName = ConvertTo-HtmlText $env:COMPUTERNAME
 $safeUser = ConvertTo-HtmlText $UserName
 $safeAddress = ConvertTo-HtmlText $Address
 $safeUntil = ConvertTo-HtmlText $BanUntil
-try {
-  $chinaTime = [TimeZoneInfo]::ConvertTimeBySystemTimeZoneId([DateTime]::UtcNow, 'China Standard Time')
-  $timeText = $chinaTime.ToString('yyyy-MM-dd HH:mm:ss') + ' 北京时间 (UTC+8)'
-} catch {
-  $timeText = [DateTime]::UtcNow.ToString('yyyy-MM-dd HH:mm:ss') + ' UTC'
+$sentTime = Get-Date
+$sentTimeText = Format-NotificationTime -Timestamp $sentTime
+$occurredTimeText = if ($OccurredAt -eq [datetime]::MinValue) {
+  $sentTimeText
+} else {
+  Format-NotificationTime -Timestamp $OccurredAt
 }
+$delayedLogin = $NotificationType -eq 'Login' -and
+  $OccurredAt -ne [datetime]::MinValue -and
+  (($sentTime.ToUniversalTime() - $OccurredAt.ToUniversalTime()).TotalSeconds -gt 60)
 
 switch ($NotificationType) {
   'Test' {
-    $text = "✅ <b>Windows Telegram 通知测试成功</b>`nVPS：$vpsName`n主机：$computerName`n时间：$timeText"
+    $text = "✅ <b>Windows Telegram 通知测试成功</b>`nVPS：$vpsName`n主机：$computerName`n时间：$sentTimeText"
   }
   'Login' {
-    $text = "✅ <b>Windows RDP 登录成功</b>`nVPS：$vpsName`n主机：$computerName`n用户：$safeUser`n来源 IP：$safeAddress`nRDP 端口：$Port`n时间：$timeText"
+    $text = "✅ <b>Windows RDP 登录成功</b>`nVPS：$vpsName`n主机：$computerName`n用户：$safeUser`n来源 IP：$safeAddress`nRDP 端口：$Port`n登录时间：$occurredTimeText"
+    if ($delayedLogin) {
+      $text += "`n通知发送时间：$sentTimeText（延迟重试）"
+    }
   }
   'Ban' {
-    $text = "⛔ <b>Windows RDP 爆破来源已封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`n失败次数：$FailureCount`nRDP 端口：$Port`n封禁至：$safeUntil`n时间：$timeText"
+    $text = "⛔ <b>Windows RDP 爆破来源已封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`n失败次数：$FailureCount`nRDP 端口：$Port`n封禁至：$safeUntil`n时间：$sentTimeText"
   }
   'Unban' {
-    $text = "♻️ <b>Windows RDP 来源已解除封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`nRDP 端口：$Port`n时间：$timeText"
+    $text = "♻️ <b>Windows RDP 来源已解除封禁</b>`nVPS：$vpsName`n主机：$computerName`n来源 IP：$safeAddress`nRDP 端口：$Port`n时间：$sentTimeText"
   }
 }
 
@@ -1175,7 +1202,26 @@ function Save-State {
   Move-Item -LiteralPath $temporary -Destination $statePath -Force
 }
 
+function ConvertFrom-SecurityEvent {
+  param([Parameter(Mandatory)][xml]$EventXml)
+
+  $fields = @{}
+  $eventData = $EventXml.Event.EventData
+  if ($null -eq $eventData) { return $fields }
+  foreach ($field in @($eventData.Data)) {
+    if ($null -eq $field) { continue }
+    $name = [string]$field.Name
+    if ([string]::IsNullOrWhiteSpace($name)) { continue }
+    # XmlElement.InnerText is stable in Windows PowerShell 5.1. The XML adapter's
+    # synthetic '#text' property is not present for every Security event field.
+    $fields[$name] = [string]$field.InnerText
+  }
+  return $fields
+}
+
 if (-not $mutex.WaitOne(30000)) { exit 0 }
+$processingRecordId = 0L
+$processingOccurredAt = $null
 try {
   if (-not (Test-Path -LiteralPath $notifierPath)) { exit 0 }
   $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4624 } -MaxEvents 100 -ErrorAction SilentlyContinue)
@@ -1197,22 +1243,34 @@ try {
   $rdpPort = [int](Get-ItemPropertyValue -Path $rdpRegistryPath -Name PortNumber)
   $newEvents = @($events | Where-Object { [long]$_.RecordId -gt $lastRecordId } | Sort-Object RecordId)
   foreach ($eventRecord in $newEvents) {
+    $processingRecordId = [long]$eventRecord.RecordId
+    $processingOccurredAt = $eventRecord.TimeCreated
     [xml]$eventXml = $eventRecord.ToXml()
-    $fields = @{}
-    foreach ($field in $eventXml.Event.EventData.Data) {
-      $fields[[string]$field.Name] = [string]$field.'#text'
-    }
+    $fields = ConvertFrom-SecurityEvent -EventXml $eventXml
 
     if ([string]$fields.LogonType -eq '10') {
       $userName = "$(if ($fields.TargetDomainName -and $fields.TargetDomainName -ne '-') { "$($fields.TargetDomainName)\" })$($fields.TargetUserName)"
       $address = [string]$fields.IpAddress
       if ([string]::IsNullOrWhiteSpace($address)) { $address = '-' }
-      & $notifierPath -NotificationType Login -UserName $userName -Address $address -Port $rdpPort | Out-Null
+      & $notifierPath `
+        -NotificationType Login `
+        -UserName $userName `
+        -Address $address `
+        -Port $rdpPort `
+        -OccurredAt $eventRecord.TimeCreated | Out-Null
     }
     Save-State -RecordId ([long]$eventRecord.RecordId)
+    $processingRecordId = 0L
+    $processingOccurredAt = $null
   }
 } catch {
-  Write-ErrorLog "RDP 登录通知失败：$($_.Exception.Message)"
+  $eventContext = if ($processingRecordId -gt 0) {
+    $occurredText = if ($null -eq $processingOccurredAt) { '-' } else { $processingOccurredAt.ToString('o') }
+    "记录 $processingRecordId；登录时间 $occurredText；"
+  } else {
+    ''
+  }
+  Write-ErrorLog "RDP 登录通知失败：$eventContext$($_.Exception.Message)"
   exit 1
 } finally {
   $mutex.ReleaseMutex()
@@ -1266,7 +1324,7 @@ function Install-TelegramNotification {
     '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
   ) | Out-Null
   $taskSettings = New-ScheduledTaskSettingsSet `
-    -MultipleInstances IgnoreNew `
+    -MultipleInstances Queue `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
     -StartWhenAvailable
   Set-ScheduledTask -TaskName $script:TelegramLoginTaskName -Settings $taskSettings | Out-Null
@@ -1513,8 +1571,13 @@ try {
   foreach ($eventRecord in @($events)) {
     [xml]$eventXml = $eventRecord.ToXml()
     $fields = @{}
-    foreach ($field in $eventXml.Event.EventData.Data) {
-      $fields[[string]$field.Name] = [string]$field.'#text'
+    foreach ($field in @($eventXml.Event.EventData.Data)) {
+      if ($null -eq $field) { continue }
+      $name = [string]$field.Name
+      if ([string]::IsNullOrWhiteSpace($name)) { continue }
+      # XmlElement.InnerText is available even when the PowerShell XML adapter
+      # does not create a '#text' property for an empty event data element.
+      $fields[$name] = [string]$field.InnerText
     }
 
     # Only RemoteInteractive (10) identifies an RDP sign-in. Logon type 3 is
@@ -1652,7 +1715,7 @@ function Install-RdpGuard {
   ) | Out-Null
 
   $taskSettings = New-ScheduledTaskSettingsSet `
-    -MultipleInstances IgnoreNew `
+    -MultipleInstances Queue `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
     -StartWhenAvailable
   Set-ScheduledTask -TaskName $script:GuardTaskName -Settings $taskSettings | Out-Null
