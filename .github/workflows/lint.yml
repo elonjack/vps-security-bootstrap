@@ -213,6 +213,19 @@ jobs:
           $installerAnalysis = @(Invoke-ScriptAnalyzer -Path $installerPath -Severity Warning, Error)
           if ($installerAnalysis.Count) { throw ($installerAnalysis | Format-Table -AutoSize | Out-String) }
 
+          $eventRegressionPath = Join-Path $PWD 'tests\windows-event-regression.ps1'
+          $eventRegressionTokens = $null
+          $eventRegressionErrors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            $eventRegressionPath,
+            [ref]$eventRegressionTokens,
+            [ref]$eventRegressionErrors
+          ) | Out-Null
+          if ($eventRegressionErrors.Count) {
+            throw ($eventRegressionErrors | ForEach-Object Message | Out-String)
+          }
+          & $eventRegressionPath -BootstrapPath $path
+
           if (-not (Test-IpOrCidr '203.0.113.10')) { throw 'IPv4 validation failed.' }
           if (-not (Test-IpOrCidr '2001:db8::/64')) { throw 'IPv6 CIDR validation failed.' }
           if (Test-IpOrCidr '203.0.113.10/99') { throw 'Invalid CIDR was accepted.' }
