@@ -56,6 +56,13 @@ jobs:
           grep -F 'append_firewall_ports' bootstrap.sh
           grep -F '追加额外 TCP 放行端口' README.md
           grep -F 'prompt_block >&2 <<EOF' bootstrap.sh
+          grep -F 'systemctl mask --runtime fail2ban.service' bootstrap.sh
+          grep -F 'systemctl unmask --runtime fail2ban.service' bootstrap.sh
+          grep -F '脚本不会修改既有屏蔽状态' bootstrap.sh
+          grep -F 'bantime.multipliers = $F2B_INCREMENT_MULTIPLIERS' bootstrap.sh
+          grep -F "readonly F2B_INCREMENT_MULTIPLIERS='1 2 4 8 16 28'" bootstrap.sh
+          grep -F 'dbpurgeage = 30d' bootstrap.sh
+          grep -F '临时阻止服务自动启动' README.md
           ! grep -F 'systemctl stop nftables' bootstrap.sh
           ! grep -F 'systemctl restart nftables' bootstrap.sh
           grep -F '20000-20199' README.md
