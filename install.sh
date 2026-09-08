@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 IFS=$'\n\t'
 
-readonly INSTALLER_VERSION='v1.4.3'
+readonly INSTALLER_VERSION='v1.4.4'
 readonly REPOSITORY='elonjack/vps-security-bootstrap'
 
 RELEASE_VERSION=$INSTALLER_VERSION
@@ -13,7 +13,7 @@ declare -a BOOTSTRAP_ARGS=()
 usage() {
   cat <<'EOF'
 Usage:
-  install.sh [--version vX.Y.Z] [--keep] [--firewall] [-- bootstrap.sh arguments]
+  install.sh [--version vX.Y.Z] [--keep] [--firewall|--update-existing] [-- bootstrap.sh arguments]
 
 Downloads bootstrap.sh and its SHA-256 file from a fixed GitHub Release,
 verifies the checksum, then starts the Debian bootstrap.
@@ -38,7 +38,7 @@ while [ "$#" -gt 0 ]; do
       KEEP_FILES=1
       shift
       ;;
-    --firewall)
+    --firewall|--update-existing)
       BOOTSTRAP_ARGS+=("$1")
       shift
       ;;
@@ -108,7 +108,7 @@ if [ "${#BOOTSTRAP_ARGS[@]}" -eq 0 ]; then
 else
   for bootstrap_arg in "${BOOTSTRAP_ARGS[@]}"; do
     case "$bootstrap_arg" in
-      --interactive|--firewall|--rotate-telegram-token)
+      --interactive|--firewall|--update-existing|--rotate-telegram-token)
         NEEDS_TTY=1
         break
         ;;
