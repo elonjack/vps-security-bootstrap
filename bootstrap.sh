@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.4.3'
+readonly SCRIPT_VERSION='v1.4.4'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -43,6 +43,7 @@ INTERACTIVE=0
 INTERACTIVE_FLAG=0
 ROTATE_TELEGRAM=0
 FIREWALL_ONLY=0
+UPDATE_EXISTING=0
 FAIL2BAN_MUTATION_ACTIVE=0
 FAIL2BAN_WAS_ACTIVE=0
 FAIL2BAN_WAS_ENABLED=0
@@ -83,6 +84,9 @@ usage() {
 管理脚本专用的 nftables 防火墙规则（不修改 SSH 或公钥）：
   sudo bash bootstrap.sh --firewall
 
+更新已有的本脚本安装（保留 SSH 公钥、端口、白名单、Telegram 和额外端口）：
+  sudo bash bootstrap.sh --update-existing
+
 自动化用法（传入参数，不进入向导）：
 EOF
   cat <<'EOF'
@@ -105,6 +109,7 @@ EOF
   --skip-system-upgrade        跳过 apt upgrade（兼容旧用法；仍会 apt update 并安装依赖）
   --rotate-telegram-token      交互式更换 Telegram Token，不修改 SSH 或 Fail2ban 策略
   --firewall                   交互式管理 nftables 放行端口和查看规则
+  --update-existing            交互式更新已有安装，不重新询问 SSH 公钥等配置
   -h, --help                   显示本帮助
 EOF
 }
@@ -145,6 +150,7 @@ while [ "$#" -gt 0 ]; do
       ;;
     --rotate-telegram-token) ROTATE_TELEGRAM=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     --firewall) FIREWALL_ONLY=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
+    --update-existing) UPDATE_EXISTING=1; INTERACTIVE=1; INTERACTIVE_FLAG=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) die "未知参数：$1（使用 --help 查看用法）" ;;
   esac
@@ -711,27 +717,30 @@ interactive_wizard() {
   [ -t 0 ] || die '交互式向导需要终端；自动化运行请传入 --public-key-file 等参数。'
   clear 2>/dev/null || true
   print_banner
-  if [ "$ROTATE_TELEGRAM" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ]; then
+  if [ "$ROTATE_TELEGRAM" -eq 0 ] && [ "$FIREWALL_ONLY" -eq 0 ] && [ "$UPDATE_EXISTING" -eq 0 ]; then
     printf '%b请选择操作：%b\n' "$STYLE_MENU" "$STYLE_RESET"
     menu_option 1 '初次部署 / 重新加固 SSH' '覆盖 root 公钥，更新 SSH / Fail2ban，并启用本脚本防火墙'
     menu_option 2 '更换 Telegram Bot Token' '不修改 SSH、公钥、端口或 Fail2ban'
     menu_option 3 'nftables 防火墙操作' '查看、管理、启用、停用或重载本脚本的防火墙规则'
+    menu_option 4 '更新 / 修复已有安装' '保留现有配置，更新系统软件包和本脚本管理的 SSH、Fail2ban、Telegram 与防火墙组件'
     menu_option 0 '退出，不做任何修改'
     while true; do
-      if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/0，无默认值]：${STYLE_RESET}" answer; then
+      if ! read -r -p "${STYLE_MENU}请选择 [1/2/3/4/0，无默认值]：${STYLE_RESET}" answer; then
         die '未读取到菜单选项，操作已取消。'
       fi
       case "$answer" in
         1) break ;;
         2) ROTATE_TELEGRAM=1; break ;;
         3) FIREWALL_ONLY=1; break ;;
+        4) UPDATE_EXISTING=1; break ;;
         0) exit 0 ;;
-        *) printf '%b请输入 1、2、3 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
+        *) printf '%b请输入 1、2、3、4 或 0。%b\n' "$STYLE_ERROR" "$STYLE_RESET" ;;
       esac
     done
   fi
   [ "$ROTATE_TELEGRAM" -eq 0 ] || return 0
   [ "$FIREWALL_ONLY" -eq 0 ] || return 0
+  [ "$UPDATE_EXISTING" -eq 0 ] || return 0
   prompt_block <<'EOF'
 注意：
   1. 只保留 root 作为 SSH 用户，并且只允许本次提供的 SSH 公钥登录。
@@ -966,10 +975,68 @@ validate_public_key() {
   fi
 }
 
+read_existing_ignore_ip() {
+  local raw entry result=''
+  local -a entries
+
+  raw=$(awk '
+    /^\[DEFAULT\][[:space:]]*$/ { in_default = 1; next }
+    /^\[[^]]+\][[:space:]]*$/ { in_default = 0 }
+    in_default && /^[[:space:]]*ignoreip[[:space:]]*=/ {
+      sub(/^[[:space:]]*ignoreip[[:space:]]*=[[:space:]]*/, "")
+      print
+      exit
+    }
+  ' "$F2B_JAIL")
+  [ -n "$raw" ] || return 0
+
+  local IFS=' '
+  read -r -a entries <<< "$raw"
+  for entry in "${entries[@]}"; do
+    case "$entry" in
+      127.0.0.1/8|::1) continue ;;
+    esac
+    result=${result:+$result,}$entry
+  done
+  printf '%s' "$result"
+}
+
+prepare_existing_install_update() {
+  [ -f "$SSH_DROPIN" ] || die '未找到本脚本管理的 SSH 配置；请使用“初次部署 / 重新加固 SSH”。'
+  [ -f "$F2B_JAIL" ] || die '未找到本脚本管理的 Fail2ban 配置；请使用“初次部署 / 重新加固 SSH”。'
+  [ -f /root/.ssh/authorized_keys ] || die '未找到 root SSH 公钥；请使用“初次部署 / 重新加固 SSH”。'
+
+  SSH_PORT=$(detect_current_ssh_port)
+  IGNORE_IP=$(read_existing_ignore_ip)
+  if [ -e "$CONF_DIR/telegram.env" ]; then
+    require_root_private_file "$CONF_DIR/telegram.env" 'Telegram 配置'
+    # 该文件由本脚本以 root:root 0600 写入；仅用于保留已有通知配置。
+    # shellcheck disable=SC1090
+    source "$CONF_DIR/telegram.env"
+  fi
+  TELEGRAM_VPS_NAME=${TELEGRAM_VPS_NAME:-$(hostname -f 2>/dev/null || hostname)}
+  SYSTEM_UPGRADE=1
+
+  prompt_block <<EOF
+即将更新 / 修复本脚本已有安装：
+  1. 保留 root SSH 公钥（不会读取、替换或删除）。
+  2. 保留 SSH 端口：$SSH_PORT。
+  3. 保留 Fail2ban 白名单：${IGNORE_IP:-未设置}。
+  4. 保留 Telegram 配置：$([ -f "$CONF_DIR/telegram.env" ] && echo 已启用 || echo 未启用)。
+  5. 保留额外防火墙端口，并更新本脚本管理的 SSH、Fail2ban、Telegram 和 nftables 配置。
+  6. 执行 apt update、apt upgrade，并更新所需 Debian 软件包。
+
+请保持当前 SSH 会话打开，直到更新完成后用新窗口验证连接。
+EOF
+  ask_yes_no '确认开始更新？' n || die '已取消，未修改系统。'
+}
+
 [ "$ROTATE_TELEGRAM" -eq 0 ] || {
   rotate_telegram_token
   exit 0
 }
+
+[ "$UPDATE_EXISTING" -eq 0 ] || prepare_existing_install_update
 
 [ -z "$TELEGRAM_TOKEN_FILE" ] || { require_root_private_file "$TELEGRAM_TOKEN_FILE" 'Telegram token'; TELEGRAM_TOKEN=$(head -n 1 "$TELEGRAM_TOKEN_FILE"); }
 [ -z "$TELEGRAM_CHAT_ID_FILE" ] || { require_root_private_file "$TELEGRAM_CHAT_ID_FILE" 'Telegram chat id'; TELEGRAM_CHAT_ID=$(head -n 1 "$TELEGRAM_CHAT_ID_FILE"); }
@@ -980,12 +1047,14 @@ if [ -n "$TELEGRAM_TOKEN" ]; then
   validate_telegram_settings
 fi
 
-if [ -n "$PUBLIC_KEY_FILE" ]; then
-  [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
-  PUBLIC_KEY=$(grep -Em1 '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[[:space:]]' "$PUBLIC_KEY_FILE" || true)
+if [ "$UPDATE_EXISTING" -eq 0 ]; then
+  if [ -n "$PUBLIC_KEY_FILE" ]; then
+    [ -r "$PUBLIC_KEY_FILE" ] || die "无法读取公钥文件：$PUBLIC_KEY_FILE"
+    PUBLIC_KEY=$(grep -Em1 '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp(256|384|521)|sk-ssh-ed25519@openssh\.com|sk-ecdsa-sha2-nistp256@openssh\.com)[[:space:]]' "$PUBLIC_KEY_FILE" || true)
+  fi
+  [ -n "$PUBLIC_KEY" ] || die '请粘贴或通过 --public-key-file 提供 .pub 公钥。'
+  [[ "$PUBLIC_KEY" != *$'\n'* && "$PUBLIC_KEY" != *$'\r'* ]] || die 'SSH 公钥只能是一行；请只粘贴 .pub 文件中的一整行。'
 fi
-[ -n "$PUBLIC_KEY" ] || die '请粘贴或通过 --public-key-file 提供 .pub 公钥。'
-[[ "$PUBLIC_KEY" != *$'\n'* && "$PUBLIC_KEY" != *$'\r'* ]] || die 'SSH 公钥只能是一行；请只粘贴 .pub 文件中的一整行。'
 
 STAMP="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 BACKUP_DIR="$CONF_DIR/backups/$STAMP"
@@ -1168,7 +1237,7 @@ command -v sshd >/dev/null 2>&1 || die '安装 openssh-server 后仍未找到 ss
 command -v ssh-keygen >/dev/null 2>&1 || die '安装 OpenSSH 后仍未找到 ssh-keygen。'
 command -v ss >/dev/null 2>&1 || die '安装 iproute2 后仍未找到 ss。'
 validate_ignore_ip
-validate_public_key
+[ "$UPDATE_EXISTING" -eq 1 ] || validate_public_key
 
 CURRENT_SSH_PORT=$(detect_current_ssh_port)
 if [ "$SSH_PORT" != "$CURRENT_SSH_PORT" ]; then
@@ -1183,20 +1252,24 @@ if ! configure_nftables_firewall "$CURRENT_SSH_PORT,$SSH_PORT"; then
   die 'nftables 防火墙配置失败；SSH、公钥和 Fail2ban 尚未修改。'
 fi
 
-info '覆盖 root 的 SSH 公钥（仅保留本次提供的公钥）'
-install -d -o root -g root -m 0700 /root/.ssh
-AUTHORIZED_KEYS_TMP=$(mktemp /root/.ssh/authorized_keys.XXXXXX) || die '无法创建 authorized_keys 临时文件。'
-if ! printf '%s\n' "$PUBLIC_KEY" > "$AUTHORIZED_KEYS_TMP" ||
-  ! chown root:root "$AUTHORIZED_KEYS_TMP" ||
-  ! chmod 0600 "$AUTHORIZED_KEYS_TMP"; then
-  rm -f "$AUTHORIZED_KEYS_TMP"
-  die '准备 authorized_keys 临时文件失败；原公钥未修改。'
-fi
-if ! mv -f "$AUTHORIZED_KEYS_TMP" /root/.ssh/authorized_keys ||
-  ! rm -f /root/.ssh/authorized_keys2; then
-  rm -f "$AUTHORIZED_KEYS_TMP"
-  restore_ssh_state
-  die '安装 root SSH 公钥失败；已恢复运行前状态。'
+if [ "$UPDATE_EXISTING" -eq 0 ]; then
+  info '覆盖 root 的 SSH 公钥（仅保留本次提供的公钥）'
+  install -d -o root -g root -m 0700 /root/.ssh
+  AUTHORIZED_KEYS_TMP=$(mktemp /root/.ssh/authorized_keys.XXXXXX) || die '无法创建 authorized_keys 临时文件。'
+  if ! printf '%s\n' "$PUBLIC_KEY" > "$AUTHORIZED_KEYS_TMP" ||
+    ! chown root:root "$AUTHORIZED_KEYS_TMP" ||
+    ! chmod 0600 "$AUTHORIZED_KEYS_TMP"; then
+    rm -f "$AUTHORIZED_KEYS_TMP"
+    die '准备 authorized_keys 临时文件失败；原公钥未修改。'
+  fi
+  if ! mv -f "$AUTHORIZED_KEYS_TMP" /root/.ssh/authorized_keys ||
+    ! rm -f /root/.ssh/authorized_keys2; then
+    rm -f "$AUTHORIZED_KEYS_TMP"
+    restore_ssh_state
+    die '安装 root SSH 公钥失败；已恢复运行前状态。'
+  fi
+else
+  info '保留现有 root SSH 公钥'
 fi
 
 info '写入 SSH 加固配置（只管理自己的 drop-in 文件）'

@@ -54,6 +54,7 @@ try {
 | `1. 初次部署 / 重新加固 SSH` | 替换 root 的 SSH 公钥、设置 SSH 端口、关闭密码和键盘交互登录、关闭转发/隧道、配置 Fail2ban，并启用本项目管理的 nftables 防火墙。 | 旧 root 公钥会失效；改端口前先放行云安全组，保留当前 SSH 会话。 |
 | `2. 更换 Telegram Bot Token` | 更新 Telegram Token、Chat ID 和 VPS 名称；用于 SSH 登录成功和 Fail2ban 封禁通知。 | 不会修改 SSH、公钥、端口、Fail2ban 策略或防火墙。 |
 | `3. nftables 防火墙操作` | 进入防火墙子菜单，管理本项目的入站放行端口。 | 不会修改 SSH 公钥或 Fail2ban。网站、HY2、VPN 等端口必须在这里明确放行。 |
+| `4. 更新 / 修复已有安装` | 升级 Debian 软件包，并重新应用本项目当前版本管理的 SSH、Fail2ban、Telegram 和 nftables 配置。 | 保留 root SSH 公钥、SSH 端口、Fail2ban 白名单、Telegram 配置和额外 TCP/UDP 放行端口；仅需一次确认。若不是由本项目初始化，请选 `1`。 |
 | `0. 退出` | 不做任何修改。 | — |
 
 防火墙只包含一个固定的 root-only HE 规则文件 `/etc/vps-security/he-protocol41.nft`；普通使用时它为空。防火墙不会加载任意规则目录，避免为未使用 HE 的 VPS 留下通用扩展入口。
@@ -67,6 +68,14 @@ try {
 | Fail2ban 白名单 | 可填可信 IP/CIDR；正常使用私钥登录不需要加白名单。 |
 | `apt upgrade` | 默认不执行；确认后才安装系统可用更新。安装脚本依赖仍会执行 `apt update`。 |
 | Telegram 通知 | 可选；Token 隐藏输入，配置成功后通知 SSH 登录与封禁事件。 |
+
+已有安装要升级时，直接运行最新版安装器后选择 `4`，或使用：
+
+```bash
+bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/latest/download/install.sh) --update-existing
+```
+
+该路径不会要求再次粘贴 SSH 公钥，也不会更换现有端口或清空防火墙额外端口；会明确提示并确认后执行 `apt upgrade`。
 
 ### Debian Fail2ban 封禁策略
 
@@ -156,12 +165,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.4.3`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.4`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.4.3
+version=v1.4.4
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -172,7 +181,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.4.3'
+$version = 'v1.4.4'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
