@@ -4,7 +4,7 @@ set -Eeuo pipefail
 IFS=$'\n\t'
 
 readonly APP='vps-security-bootstrap'
-readonly SCRIPT_VERSION='v1.4.2'
+readonly SCRIPT_VERSION='v1.4.3'
 readonly CONF_DIR='/etc/vps-security'
 readonly SSH_DROPIN='/etc/ssh/sshd_config.d/00-vps-security-bootstrap.conf'
 readonly LEGACY_SSH_DROPIN='/etc/ssh/sshd_config.d/99-vps-security-bootstrap.conf'
@@ -26,6 +26,7 @@ readonly LEGACY_FIREWALL_HE_RULE_FILE="$LEGACY_FIREWALL_INPUT_EXTENSION_DIR/50-h
 readonly FIREWALL_LOADER='/usr/local/sbin/vps-security-load-firewall'
 readonly NFTABLES_DROPIN_DIR='/etc/systemd/system/nftables.service.d'
 readonly NFTABLES_DROPIN="$NFTABLES_DROPIN_DIR/20-vps-security-bootstrap.conf"
+readonly F2B_INCREMENT_MULTIPLIERS='1 2 4 8 16 28'
 SSH_PORT=52022
 PUBLIC_KEY=''
 PUBLIC_KEY_FILE=''
@@ -45,6 +46,7 @@ FIREWALL_ONLY=0
 FAIL2BAN_MUTATION_ACTIVE=0
 FAIL2BAN_WAS_ACTIVE=0
 FAIL2BAN_WAS_ENABLED=0
+FAIL2BAN_START_GUARD_ACTIVE=0
 NFTABLES_WAS_ACTIVE=0
 NFTABLES_WAS_ENABLED=0
 ORIGINAL_ARGC=$#
@@ -1082,6 +1084,7 @@ restore_fail2ban_state() {
   elif [ -e /etc/pam.d/sshd ]; then
     sed -i '/^# vps-security-bootstrap: Telegram SSH login notification$/,+1d' /etc/pam.d/sshd
   fi
+  release_fail2ban_start_guard || true
   if [ "$FAIL2BAN_WAS_ACTIVE" -eq 1 ]; then
     systemctl restart fail2ban 2>/dev/null || true
   else
@@ -1093,6 +1096,39 @@ restore_fail2ban_state() {
     systemctl disable fail2ban 2>/dev/null || true
   fi
   systemctl daemon-reload 2>/dev/null || true
+}
+
+# Debian 在 apt 安装或升级 fail2ban 时会自动启动服务。此时配置文件尚未写完，
+# 它可能按发行版默认的 10 分钟策略扫描已有 journal，从而生成一次错误的过渡封禁。
+# 运行期 mask 同时覆盖首次安装和升级，不会修改管理员的持久化 unit 设置。
+suppress_fail2ban_autostart() {
+  local unit_state
+  unit_state=$(systemctl is-enabled fail2ban.service 2>/dev/null || true)
+  case "$unit_state" in
+    masked|masked-runtime)
+      die 'fail2ban.service 当前已被手动屏蔽。请先由管理员解除屏蔽后再运行本脚本；脚本不会修改既有屏蔽状态。'
+      ;;
+  esac
+
+  if ! systemctl mask --runtime fail2ban.service; then
+    die '无法在安装期间临时屏蔽 fail2ban.service。为避免按默认策略提前启动，已取消执行。'
+  fi
+  FAIL2BAN_START_GUARD_ACTIVE=1
+  trap 'release_fail2ban_start_guard' EXIT
+
+  if [ "$FAIL2BAN_WAS_ACTIVE" -eq 1 ] && ! systemctl stop fail2ban.service; then
+    release_fail2ban_start_guard || true
+    die '无法停止已有的 Fail2ban 服务；为避免在配置切换期间产生旧策略封禁，已取消执行。'
+  fi
+}
+
+release_fail2ban_start_guard() {
+  [ "$FAIL2BAN_START_GUARD_ACTIVE" -eq 1 ] || return 0
+  if ! systemctl unmask --runtime fail2ban.service; then
+    printf '%b错误：无法解除 fail2ban.service 的临时启动屏蔽。%b\n' "$STYLE_ERROR" "$STYLE_RESET" >&2
+    return 1
+  fi
+  FAIL2BAN_START_GUARD_ACTIVE=0
 }
 
 handle_unexpected_error() {
@@ -1118,6 +1154,7 @@ systemctl daemon-reload
 
 info '安装 Debian 官方软件包（OpenSSH、Fail2ban、nftables、curl）'
 export DEBIAN_FRONTEND=noninteractive
+suppress_fail2ban_autostart
 if [ -f "$AUTO_UPGRADES_CONF" ]; then
   rm -f "$AUTO_UPGRADES_CONF"
   echo '提示：已移除本工具旧版创建的后台自动更新设置；以后只执行你在向导中明确确认的一次性更新。'
@@ -1389,7 +1426,8 @@ bantime = $BANTIME
 findtime = 3m
 maxretry = 3
 bantime.increment = true
-bantime.factor = 2
+bantime.factor = 1
+bantime.multipliers = $F2B_INCREMENT_MULTIPLIERS
 bantime.maxtime = 4w
 EOF
 if [ -n "$TELEGRAM_TOKEN" ]; then
@@ -1407,7 +1445,7 @@ chmod 0640 /var/log/fail2ban.log
 cat > "$F2B_LOG_LOCAL" <<'EOF'
 [Definition]
 logtarget = /var/log/fail2ban.log
-dbpurgeage = 60d
+dbpurgeage = 30d
 EOF
 cat > "$F2B_RECIDIVE_JAIL" <<'EOF'
 [recidive]
@@ -1430,6 +1468,10 @@ info '校验并启动 Fail2ban'
 if ! fail2ban-client -d >/dev/null; then
   restore_fail2ban_state
   die 'Fail2ban 配置校验失败；已恢复运行前的 Fail2ban、PAM 和 Telegram 通知配置。'
+fi
+if ! release_fail2ban_start_guard; then
+  restore_fail2ban_state
+  die '无法解除 Fail2ban 的临时启动屏蔽；已恢复运行前配置。'
 fi
 if ! systemctl enable fail2ban; then
   restore_fail2ban_state

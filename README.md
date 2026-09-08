@@ -68,6 +68,14 @@ try {
 | `apt upgrade` | 默认不执行；确认后才安装系统可用更新。安装脚本依赖仍会执行 `apt update`。 |
 | Telegram 通知 | 可选；Token 隐藏输入，配置成功后通知 SSH 登录与封禁事件。 |
 
+### Debian Fail2ban 封禁策略
+
+脚本在安装或升级 Fail2ban 前会临时阻止服务自动启动，先写完本项目的 jail 和通知配置后才启动一次；因此不会按 Debian 默认策略扫描安装前已有的 SSH journal 并产生过渡封禁。
+
+同一 IP 在 3 分钟内 SSH 失败 3 次，会由 `sshd` jail 仅封锁 SSH TCP 端口。Fail2ban 的历史记录保留 30 天，临时封禁依次为 1、2、4、8、16、28 天；第 6 次及以后维持 28 天。
+
+`recidive` 是另一条规则：若同一 IP 在 30 天内累计触发 5 次完整封禁，它会立即追加一个全端口的永久 nftables 封禁。因此在正常运行且 `recidive` 可用时，第 5 次独立 SSH 封禁的最终效果是全端口永久封禁，而不是 16 天的仅 SSH 封禁。
+
 ### Debian 防火墙子菜单
 
 | 子菜单 | 作用 |
@@ -148,12 +156,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.4.2`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.3`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.4.2
+version=v1.4.3
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -164,7 +172,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.4.2'
+$version = 'v1.4.3'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
