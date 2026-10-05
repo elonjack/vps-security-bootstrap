@@ -434,7 +434,8 @@ jobs:
             'offenseWindowDays',
             'banDurationsMinutes',
             'permanentAfter',
-            "if ([bool]`$bans[`$address].permanent) { continue }"
+            'Protect-RdpGuardAddress',
+            '-Repair'
           )) {
             if ($guardSource -notmatch [regex]::Escape($requiredGuardFeature)) {
               throw "RDP Guard escalation feature is missing: $requiredGuardFeature"

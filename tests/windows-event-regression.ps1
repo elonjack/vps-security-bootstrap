@@ -10,6 +10,10 @@ $mockNames = @(
   'Get-WinEvent',
   'Get-ItemPropertyValue',
   'Get-NetFirewallRule',
+  'Get-NetFirewallPortFilter',
+  'Get-NetFirewallAddressFilter',
+  'Get-NetFirewallApplicationFilter',
+  'Get-NetFirewallServiceFilter',
   'New-NetFirewallRule',
   'Remove-NetFirewallRule'
 )
@@ -79,10 +83,29 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   $loginEvent | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $global:ciLoginEventXml }
   $global:ciLoginEventXml = $loginEventXml
   $global:ciEvents = @($loginEvent)
+  $global:ciWinEventOldestCalls = 0
   function global:Get-WinEvent {
     [CmdletBinding()]
-    param([hashtable]$FilterHashtable, [int]$MaxEvents)
-    return $global:ciEvents
+    param(
+      [hashtable]$FilterHashtable,
+      [string]$LogName,
+      [string]$FilterXPath,
+      [switch]$Oldest,
+      [int]$MaxEvents
+    )
+    $events = @($global:ciEvents)
+    if ($FilterXPath -match 'EventRecordID > ([0-9]+)') {
+      $minimumRecordId = [long]$Matches[1]
+      $events = @($events | Where-Object { [long]$_.RecordId -gt $minimumRecordId })
+    }
+    if ($Oldest) {
+      $global:ciWinEventOldestCalls++
+      $events = @($events | Sort-Object RecordId)
+    } else {
+      $events = @($events | Sort-Object RecordId -Descending)
+    }
+    if ($MaxEvents -gt 0) { $events = @($events | Select-Object -First $MaxEvents) }
+    return $events
   }
   function global:Get-ItemPropertyValue {
     [CmdletBinding()]
@@ -97,6 +120,30 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
       $capture.Port -ne 44756 -or
       ([datetime]$capture.OccurredAt) -ne $occurredAt.DateTime) {
     throw "Login watcher did not process the empty-field event: $($capture | ConvertTo-Json -Compress)"
+  }
+
+  $global:ciWinEventOldestCalls = 0
+  $global:ciEvents = @(102..251 | ForEach-Object {
+    $event = [pscustomobject]@{ RecordId = [long]$_; TimeCreated = $occurredAt.AddSeconds($_) }
+    $event | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $global:ciLoginEventXml }
+    $event
+  })
+  & $watcherPath
+  $pagedState = Get-Content `
+    -LiteralPath (Join-Path $dataRoot 'telegram-rdp-login-state.json') `
+    -Raw | ConvertFrom-Json
+  if ([long]$pagedState.lastRecordId -ne 251L -or $global:ciWinEventOldestCalls -lt 2) {
+    throw "Login watcher did not process all paged RDP events: state=$($pagedState.lastRecordId), pages=$global:ciWinEventOldestCalls"
+  }
+  @{ lastRecordId = 999 } | ConvertTo-Json |
+    Set-Content -LiteralPath (Join-Path $dataRoot 'telegram-rdp-login-state.json') -Encoding UTF8
+  $global:ciEvents = @($loginEvent)
+  & $watcherPath
+  $resetState = Get-Content `
+    -LiteralPath (Join-Path $dataRoot 'telegram-rdp-login-state.json') `
+    -Raw | ConvertFrom-Json
+  if ([long]$resetState.lastRecordId -ne 101L) {
+    throw "Login watcher did not recover after the Security log record IDs reset: $($resetState.lastRecordId)"
   }
 
   Remove-Item -LiteralPath $notifierPath -Force
@@ -120,6 +167,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     $event | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $global:ciGuardEventXml }
     $event
   })
+  $global:ciNewFirewallRuleCalls = 0
   function global:Get-NetFirewallRule {
     [CmdletBinding()]
     param([Parameter(ValueFromRemainingArguments = $true)]$Remaining)
@@ -127,6 +175,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   function global:New-NetFirewallRule {
     [CmdletBinding()]
     param([Parameter(ValueFromRemainingArguments = $true)]$Remaining)
+    $global:ciNewFirewallRuleCalls++
     return [pscustomobject]@{}
   }
   function global:Remove-NetFirewallRule {
@@ -139,6 +188,83 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   if ($null -eq $ban -or $ban.offenseCount -ne 1 -or $ban.permanent) {
     throw "RDP Guard did not process the empty-field failed-login event: $($guardState | ConvertTo-Json -Depth 5 -Compress)"
   }
+  if ($global:ciNewFirewallRuleCalls -ne 2) {
+    throw "RDP Guard did not create both TCP and UDP block rules: $global:ciNewFirewallRuleCalls"
+  }
+  $global:ciNewFirewallRuleCalls = 0
+  $global:ciEvents = @()
+  & $guardPath
+  if ($global:ciNewFirewallRuleCalls -ne 2) {
+    throw "RDP Guard did not repair both missing block rules for an active ban: $global:ciNewFirewallRuleCalls"
+  }
+
+  if (-not (Test-FirewallLocalPortMatch -LocalPort @('Any') -Port 44756) -or
+      -not (Test-FirewallLocalPortMatch -LocalPort @('44000-45000') -Port 44756) -or
+      (Test-FirewallLocalPortMatch -LocalPort @('3389') -Port 44756)) {
+    throw 'Firewall local-port conflict matching failed.'
+  }
+
+  $global:ciFirewallRemoteAddress = 'Any'
+  function global:Get-NetFirewallRule {
+    [CmdletBinding()]
+    param(
+      [string[]]$Name,
+      [string]$PolicyStore,
+      [object[]]$Enabled,
+      [object[]]$Direction,
+      [object[]]$Action
+    )
+    return [pscustomobject]@{
+      Name = 'Legacy-Rdp-Allow'
+      DisplayName = 'Legacy RDP Allow Any'
+      Group = 'Legacy'
+      PolicyStoreSourceType = 'Local'
+    }
+  }
+  function global:Get-NetFirewallPortFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    process { return [pscustomobject]@{ Protocol = 'TCP'; LocalPort = '44756' } }
+  }
+  function global:Get-NetFirewallAddressFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    process { return [pscustomobject]@{ RemoteAddress = $global:ciFirewallRemoteAddress } }
+  }
+  function global:Get-NetFirewallApplicationFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    process { return [pscustomobject]@{ Program = 'Any' } }
+  }
+  function global:Get-NetFirewallServiceFilter {
+    [CmdletBinding()]
+    param([Parameter(ValueFromPipeline)]$InputObject)
+    process { return [pscustomobject]@{ Service = 'Any' } }
+  }
+  $conflicts = @(Get-RdpFirewallConflict -Port 44756)
+  if ($conflicts.Count -ne 1 -or $conflicts[0].Name -ne 'Legacy-Rdp-Allow') {
+    throw 'A broad unmanaged RDP allow rule was not detected.'
+  }
+  $global:ciFirewallRemoteAddress = '203.0.113.10'
+  if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 1) {
+    throw 'An unmanaged allow rule for a different source was not reported as a whitelist conflict.'
+  }
+
+  $bootstrapDefinition = Get-Content -LiteralPath $BootstrapPath -Raw -Encoding UTF8
+  if ($bootstrapDefinition -match '-MultipleInstances Queue' -or
+      ([regex]::Matches($bootstrapDefinition, '-MultipleInstances IgnoreNew')).Count -lt 2) {
+    throw 'Event-driven Windows tasks must ignore duplicate triggers instead of queueing PowerShell instances.'
+  }
+  $watcherSource = Get-TelegramLoginWatcherSource
+  if ($watcherSource -notmatch 'EventRecordID > \$lastRecordId' -or
+      $watcherSource -notmatch '-Oldest' -or
+      $watcherSource -notmatch 'latestEvent\.RecordId -lt \$lastRecordId') {
+    throw 'Telegram login watcher must process RDP events incrementally in oldest-first pages.'
+  }
+  $guardSource = Get-RdpGuardSource
+  if ($guardSource -notmatch 'Protect-RdpGuardAddress.*-Repair') {
+    throw 'RDP Guard must repair a missing firewall rule for an active ban.'
+  }
 } finally {
   $env:ProgramData = $originalProgramData
   foreach ($name in $mockNames) {
@@ -149,5 +275,8 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     }
   }
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
-  Remove-Variable ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents -Scope Global -ErrorAction SilentlyContinue
+  Remove-Variable `
+    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls `
+    -Scope Global `
+    -ErrorAction SilentlyContinue
 }
