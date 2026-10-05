@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.4'
+$script:ScriptVersion = 'v1.4.5'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -704,6 +704,142 @@ function Invoke-NativeCommand {
   return $exitCode
 }
 
+function Enter-RdpGuardMutex {
+  param([ValidateRange(1000, 120000)][int]$TimeoutMilliseconds = 30000)
+
+  $mutex = [Threading.Mutex]::new($false, 'Global\VpsSecurityBootstrap-RdpGuard')
+  $acquired = $false
+  try {
+    try {
+      $acquired = $mutex.WaitOne($TimeoutMilliseconds)
+    } catch [Threading.AbandonedMutexException] {
+      # An abandoned mutex is granted to this caller. Continue while treating it
+      # as acquired so stale state can be repaired by the next Guard run.
+      $acquired = $true
+    }
+    if (-not $acquired) {
+      Write-TerminatingError 'RDP Guard 正在处理安全事件，请稍后重试。'
+    }
+    return $mutex
+  } catch {
+    if (-not $acquired) { $mutex.Dispose() }
+    throw
+  }
+}
+
+function Exit-RdpGuardMutex {
+  param([Parameter(Mandatory)][Threading.Mutex]$Mutex)
+
+  try {
+    $Mutex.ReleaseMutex()
+  } catch [ApplicationException] {
+    Write-Verbose 'RDP Guard mutex 已不属于当前线程。'
+  } finally {
+    $Mutex.Dispose()
+  }
+}
+
+function Test-FirewallLocalPortMatch {
+  param(
+    [Parameter(Mandatory)][object[]]$LocalPort,
+    [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port
+  )
+
+  foreach ($entry in $LocalPort) {
+    foreach ($part in ([string]$entry).Split(',')) {
+      $candidate = $part.Trim()
+      if ($candidate -match '^(?i:any)$') { return $true }
+      if ($candidate -match '^([0-9]{1,5})-([0-9]{1,5})$') {
+        $start = [int]$Matches[1]
+        $end = [int]$Matches[2]
+        if ($Port -ge $start -and $Port -le $end) { return $true }
+        continue
+      }
+      $numericPort = 0
+      if ([int]::TryParse($candidate, [ref]$numericPort) -and $numericPort -eq $Port) {
+        return $true
+      }
+    }
+  }
+  return $false
+}
+
+function Get-RdpFirewallConflict {
+  param([Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port)
+
+  $conflicts = [Collections.Generic.List[object]]::new()
+  $rules = @(
+    Get-NetFirewallRule `
+      -PolicyStore ActiveStore `
+      -Enabled True `
+      -Direction Inbound `
+      -Action Allow `
+      -ErrorAction Stop |
+      Where-Object {
+        $_.Group -ne $script:FirewallGroup -and
+        $_.Name -notlike 'VpsSecurity-RdpAllow-*'
+      }
+  )
+
+  foreach ($rule in $rules) {
+    $portFilters = @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)
+    $addressFilters = @($rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
+    $applicationFilters = @($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
+    $serviceFilters = @($rule | Get-NetFirewallServiceFilter -ErrorAction Stop)
+
+    $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) })
+
+    $programs = @($applicationFilters | ForEach-Object { @($_.Program) })
+    $services = @($serviceFilters | ForEach-Object { @($_.Service) })
+    $programCanHostRdp = $programs.Count -eq 0 -or [bool]($programs | Where-Object {
+      [string]::IsNullOrWhiteSpace([string]$_) -or
+      [string]$_ -match '^(?i:any|\*)$' -or
+      [string]$_ -match '(?i)(^|\\)svchost\.exe$'
+    })
+    $serviceCanHostRdp = $services.Count -eq 0 -or [bool]($services | Where-Object {
+      [string]::IsNullOrWhiteSpace([string]$_) -or
+      [string]$_ -match '^(?i:any|\*|termservice)$'
+    })
+    if (-not $programCanHostRdp -or -not $serviceCanHostRdp) { continue }
+
+    foreach ($portFilter in $portFilters) {
+      $protocol = [string]$portFilter.Protocol
+      if ($protocol -notmatch '^(?i:any|tcp|udp|6|17|256)$') { continue }
+      if (-not (Test-FirewallLocalPortMatch -LocalPort @($portFilter.LocalPort) -Port $Port)) {
+        continue
+      }
+      $conflicts.Add([pscustomobject]@{
+        Name = [string]$rule.Name
+        DisplayName = [string]$rule.DisplayName
+        Protocol = $protocol
+        LocalPort = (@($portFilter.LocalPort) -join ',')
+        RemoteAddress = if ($remoteAddresses.Count) { $remoteAddresses -join ',' } else { 'Any' }
+        Program = if ($programs.Count) { $programs -join ',' } else { 'Any' }
+        Service = if ($services.Count) { $services -join ',' } else { 'Any' }
+        PolicyStoreSourceType = [string]$rule.PolicyStoreSourceType
+      })
+    }
+  }
+  return $conflicts.ToArray()
+}
+
+function Assert-NoRdpFirewallConflict {
+  param(
+    [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
+    [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RemoteAddresses
+  )
+
+  if ($RemoteAddresses.Count -eq 0) { return }
+  $conflicts = @(Get-RdpFirewallConflict -Port $Port)
+  if ($conflicts.Count -eq 0) { return }
+
+  Write-WarningLine "发现可能绕过端口 $Port 来源白名单的现有入站放行规则："
+  $conflicts |
+    Select-Object DisplayName, Name, Protocol, LocalPort, RemoteAddress, Program, Service, PolicyStoreSourceType |
+    Format-Table -Wrap -AutoSize
+  Write-TerminatingError '为避免产生虚假的白名单安全感，系统尚未修改。请先禁用或收紧以上冲突规则，再重新运行。'
+}
+
 function Export-RegistryKeyBackup {
   param(
     [Parameter(Mandatory)][string]$RegistryPath,
@@ -728,15 +864,63 @@ function Export-RegistryKeyBackup {
 }
 
 function Protect-DataDirectory {
-  New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null
-  New-Item -ItemType Directory -Path $script:BackupRoot -Force | Out-Null
-
+  if (Test-Path -LiteralPath $script:DataRoot) {
+    $existingDataRoot = Get-Item -LiteralPath $script:DataRoot -Force
+    if (-not $existingDataRoot.PSIsContainer -or
+        ($existingDataRoot.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Write-TerminatingError "受保护数据目录必须是普通目录，不能是文件、链接或重解析点：$($existingDataRoot.FullName)"
+    }
+  } else {
+    New-Item -ItemType Directory -Path $script:DataRoot -Force | Out-Null
+  }
   $systemSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
   $administratorsSid = [Security.Principal.SecurityIdentifier]::new('S-1-5-32-544')
-  $items = @((Get-Item -LiteralPath $script:DataRoot -Force)) + @(
-    Get-ChildItem -LiteralPath $script:DataRoot -Force -Recurse -ErrorAction SilentlyContinue |
-      Where-Object { -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) }
-  )
+
+  $dataRootItem = Get-Item -LiteralPath $script:DataRoot -Force
+  if ($dataRootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    Write-TerminatingError "受保护数据目录不能是链接或重解析点：$($dataRootItem.FullName)"
+  }
+
+  $rootAcl = [Security.AccessControl.DirectorySecurity]::new()
+  $rootAcl.SetAccessRuleProtection($true, $false)
+  $rootAcl.SetOwner($administratorsSid)
+  $rootInheritance = [Security.AccessControl.InheritanceFlags]'ContainerInherit, ObjectInherit'
+  foreach ($sid in @($systemSid, $administratorsSid)) {
+    $rootRule = [Security.AccessControl.FileSystemAccessRule]::new(
+      $sid,
+      [Security.AccessControl.FileSystemRights]::FullControl,
+      $rootInheritance,
+      [Security.AccessControl.PropagationFlags]::None,
+      [Security.AccessControl.AccessControlType]::Allow
+    )
+    $rootAcl.AddAccessRule($rootRule) | Out-Null
+  }
+  Set-Acl -LiteralPath $dataRootItem.FullName -AclObject $rootAcl
+
+  if (Test-Path -LiteralPath $script:BackupRoot) {
+    $existingBackupRoot = Get-Item -LiteralPath $script:BackupRoot -Force
+    if (-not $existingBackupRoot.PSIsContainer -or
+        ($existingBackupRoot.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+      Write-TerminatingError "备份目录必须是普通目录，不能是文件、链接或重解析点：$($existingBackupRoot.FullName)"
+    }
+  } else {
+    New-Item -ItemType Directory -Path $script:BackupRoot -Force | Out-Null
+  }
+  $items = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+  $pending = [Collections.Generic.Queue[string]]::new()
+  $pending.Enqueue($script:DataRoot)
+  while ($pending.Count -gt 0) {
+    $directory = $pending.Dequeue()
+    foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)) {
+      if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+        Write-TerminatingError "受保护数据目录中发现链接或重解析点：$($item.FullName)"
+      }
+      $items.Add($item)
+      if ($item.PSIsContainer) { $pending.Enqueue($item.FullName) }
+    }
+  }
+
+  $items.Insert(0, $dataRootItem)
   foreach ($item in $items) {
     if ($item.PSIsContainer) {
       $acl = [Security.AccessControl.DirectorySecurity]::new()
@@ -847,6 +1031,14 @@ function Save-SecurityBackup {
     $policyValueExists = $true
     $policyValue = [int]$policySettings.UserAuthentication
   }
+  $remoteAssistanceSettings = Get-ItemProperty -Path $script:RemoteAssistancePath -ErrorAction SilentlyContinue
+  $remoteAssistanceValueExists = $false
+  $remoteAssistanceValue = $null
+  if ($remoteAssistanceSettings -and
+      $remoteAssistanceSettings.PSObject.Properties.Name -contains 'fAllowToGetHelp') {
+    $remoteAssistanceValueExists = $true
+    $remoteAssistanceValue = [int]$remoteAssistanceSettings.fAllowToGetHelp
+  }
   $windowsUpdateService = Get-CimInstance -ClassName Win32_Service -Filter "Name='wuauserv'" -ErrorAction Stop
 
   $metadata = [ordered]@{
@@ -856,6 +1048,8 @@ function Save-SecurityBackup {
     rdpPort = Get-CurrentRdpPort
     policyUserAuthenticationExists = $policyValueExists
     policyUserAuthenticationValue = $policyValue
+    remoteAssistanceValueExists = $remoteAssistanceValueExists
+    remoteAssistanceValue = $remoteAssistanceValue
     windowsUpdateServiceStartMode = $windowsUpdateService.StartMode
   }
   $metadata | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $backupPath 'metadata.json') -Encoding UTF8
@@ -914,6 +1108,22 @@ if (Test-Path -LiteralPath $remoteAssistanceRegistry) {
   Invoke-RestoreNative 'reg.exe' @('import', $remoteAssistanceRegistry)
 } elseif (Test-Path -LiteralPath $remoteAssistanceMissing) {
   Remove-Item -LiteralPath 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Recurse -Force -ErrorAction SilentlyContinue
+}
+if ($metadata.PSObject.Properties.Name -contains 'remoteAssistanceValueExists') {
+  if ([bool]$metadata.remoteAssistanceValueExists) {
+    New-Item -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' -Force | Out-Null
+    New-ItemProperty `
+      -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' `
+      -Name fAllowToGetHelp `
+      -PropertyType DWord `
+      -Value ([int]$metadata.remoteAssistanceValue) `
+      -Force | Out-Null
+  } elseif (Test-Path -LiteralPath $remoteAssistanceRegistry) {
+    Remove-ItemProperty `
+      -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Remote Assistance' `
+      -Name fAllowToGetHelp `
+      -ErrorAction SilentlyContinue
+  }
 }
 $policyRegistry = Join-Path $backupPath 'terminal-server-policy.reg'
 $policyMissing = Join-Path $backupPath 'terminal-server-policy.missing'
@@ -1219,36 +1429,62 @@ function ConvertFrom-SecurityEvent {
   return $fields
 }
 
-if (-not $mutex.WaitOne(30000)) { exit 0 }
+$mutexAcquired = $false
 $processingRecordId = 0L
 $processingOccurredAt = $null
 try {
+  try {
+    $mutexAcquired = $mutex.WaitOne(30000)
+  } catch [Threading.AbandonedMutexException] {
+    $mutexAcquired = $true
+    Write-ErrorLog '接管了异常退出任务遗留的互斥锁。'
+  }
+  if (-not $mutexAcquired) { exit 0 }
   if (-not (Test-Path -LiteralPath $notifierPath)) { exit 0 }
-  $events = @(Get-WinEvent -FilterHashtable @{ LogName = 'Security'; Id = 4624 } -MaxEvents 100 -ErrorAction SilentlyContinue)
-  if ($events.Count -eq 0) { exit 0 }
+  $rdpLogonFilter = "*[System[(EventID=4624)]] and *[EventData[Data[@Name='LogonType']='10']]"
+  $latestEvent = Get-WinEvent `
+    -LogName Security `
+    -FilterXPath $rdpLogonFilter `
+    -MaxEvents 1 `
+    -ErrorAction SilentlyContinue
+  if (-not $latestEvent) { exit 0 }
 
   if (-not (Test-Path -LiteralPath $statePath)) {
-    Save-State -RecordId ([long]$events[0].RecordId)
+    Save-State -RecordId ([long]$latestEvent.RecordId)
     exit 0
   }
   try {
     $state = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
     $lastRecordId = [long]$state.lastRecordId
   } catch {
-    Save-State -RecordId ([long]$events[0].RecordId)
+    Save-State -RecordId ([long]$latestEvent.RecordId)
     Write-ErrorLog "登录通知状态已重置：$($_.Exception.Message)"
+    exit 0
+  }
+  if ([long]$latestEvent.RecordId -lt $lastRecordId) {
+    Save-State -RecordId ([long]$latestEvent.RecordId)
+    Write-ErrorLog '检测到 Windows 安全日志记录编号已重置；登录通知游标已重新初始化。'
     exit 0
   }
 
   $rdpPort = [int](Get-ItemPropertyValue -Path $rdpRegistryPath -Name PortNumber)
-  $newEvents = @($events | Where-Object { [long]$_.RecordId -gt $lastRecordId } | Sort-Object RecordId)
-  foreach ($eventRecord in $newEvents) {
-    $processingRecordId = [long]$eventRecord.RecordId
-    $processingOccurredAt = $eventRecord.TimeCreated
-    [xml]$eventXml = $eventRecord.ToXml()
-    $fields = ConvertFrom-SecurityEvent -EventXml $eventXml
+  $batchSize = 100
+  do {
+    $newEventFilter = "*[System[(EventID=4624) and EventRecordID > $lastRecordId]] and *[EventData[Data[@Name='LogonType']='10']]"
+    $newEvents = @(
+      Get-WinEvent `
+        -LogName Security `
+        -FilterXPath $newEventFilter `
+        -Oldest `
+        -MaxEvents $batchSize `
+        -ErrorAction SilentlyContinue
+    )
+    foreach ($eventRecord in $newEvents) {
+      $processingRecordId = [long]$eventRecord.RecordId
+      $processingOccurredAt = $eventRecord.TimeCreated
+      [xml]$eventXml = $eventRecord.ToXml()
+      $fields = ConvertFrom-SecurityEvent -EventXml $eventXml
 
-    if ([string]$fields.LogonType -eq '10') {
       $userName = "$(if ($fields.TargetDomainName -and $fields.TargetDomainName -ne '-') { "$($fields.TargetDomainName)\" })$($fields.TargetUserName)"
       $address = [string]$fields.IpAddress
       if ([string]::IsNullOrWhiteSpace($address)) { $address = '-' }
@@ -1258,11 +1494,12 @@ try {
         -Address $address `
         -Port $rdpPort `
         -OccurredAt $eventRecord.TimeCreated | Out-Null
+      $lastRecordId = [long]$eventRecord.RecordId
+      Save-State -RecordId $lastRecordId
+      $processingRecordId = 0L
+      $processingOccurredAt = $null
     }
-    Save-State -RecordId ([long]$eventRecord.RecordId)
-    $processingRecordId = 0L
-    $processingOccurredAt = $null
-  }
+  } while ($newEvents.Count -eq $batchSize)
 } catch {
   $eventContext = if ($processingRecordId -gt 0) {
     $occurredText = if ($null -eq $processingOccurredAt) { '-' } else { $processingOccurredAt.ToString('o') }
@@ -1273,7 +1510,7 @@ try {
   Write-ErrorLog "RDP 登录通知失败：$eventContext$($_.Exception.Message)"
   exit 1
 } finally {
-  $mutex.ReleaseMutex()
+  if ($mutexAcquired) { $mutex.ReleaseMutex() }
   $mutex.Dispose()
 }
 '@
@@ -1324,7 +1561,7 @@ function Install-TelegramNotification {
     '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
   ) | Out-Null
   $taskSettings = New-ScheduledTaskSettingsSet `
-    -MultipleInstances Queue `
+    -MultipleInstances IgnoreNew `
     -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
     -StartWhenAvailable
   Set-ScheduledTask -TaskName $script:TelegramLoginTaskName -Settings $taskSettings | Out-Null
@@ -1462,6 +1699,32 @@ function Get-RuleSuffix {
   }
 }
 
+function Protect-RdpGuardAddress {
+  param(
+    [Parameter(Mandatory)][string]$Address,
+    [Parameter(Mandatory)][int[]]$Ports,
+    [switch]$Repair
+  )
+
+  $suffix = Get-RuleSuffix -Address $Address
+  foreach ($protocol in @('TCP', 'UDP')) {
+    $ruleName = "VpsSecurity-RdpBlock-$suffix-$protocol"
+    if (Get-NetFirewallRule -Name $ruleName -ErrorAction SilentlyContinue) { continue }
+    New-NetFirewallRule `
+      -Name $ruleName `
+      -DisplayName "VPS Security - RDP block $Address ($protocol)" `
+      -Group $firewallGroup `
+      -Direction Inbound `
+      -Action Block `
+      -Enabled True `
+      -Profile Any `
+      -Protocol $protocol `
+      -LocalPort $Ports `
+      -RemoteAddress $Address | Out-Null
+    if ($Repair) { Write-GuardLog "已补回缺失的封禁规则：$Address ($protocol)" }
+  }
+}
+
 function Save-State {
   param([hashtable]$Bans, [hashtable]$Offenses)
   $tempPath = "$statePath.tmp"
@@ -1470,8 +1733,15 @@ function Save-State {
   Move-Item -LiteralPath $tempPath -Destination $statePath -Force
 }
 
-if (-not $mutex.WaitOne(30000)) { exit 0 }
+$mutexAcquired = $false
 try {
+  try {
+    $mutexAcquired = $mutex.WaitOne(30000)
+  } catch [Threading.AbandonedMutexException] {
+    $mutexAcquired = $true
+    Write-GuardLog '接管了异常退出任务遗留的互斥锁。'
+  }
+  if (-not $mutexAcquired) { exit 0 }
   if (-not (Test-Path -LiteralPath $configPath)) { exit 0 }
   $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
   $protectedPorts = if ($config.PSObject.Properties.Name -contains 'protectedPorts') {
@@ -1543,7 +1813,10 @@ try {
   }
 
   foreach ($address in @($bans.Keys)) {
-    if ([bool]$bans[$address].permanent) { continue }
+    if ([bool]$bans[$address].permanent) {
+      Protect-RdpGuardAddress -Address $address -Ports $protectedPorts -Repair
+      continue
+    }
     try { $expires = [datetime]$bans[$address].expiresAt } catch {
       $bans.Remove($address)
       Write-GuardLog "移除无效的封禁记录：$address"
@@ -1562,6 +1835,8 @@ try {
           Write-GuardLog "Telegram 解封通知失败：$($_.Exception.Message)"
         }
       }
+    } else {
+      Protect-RdpGuardAddress -Address $address -Ports $protectedPorts -Repair
     }
   }
 
@@ -1618,19 +1893,7 @@ try {
 
     Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
       Remove-NetFirewallRule -ErrorAction SilentlyContinue
-    foreach ($protocol in @('TCP', 'UDP')) {
-      New-NetFirewallRule `
-        -Name "VpsSecurity-RdpBlock-$suffix-$protocol" `
-        -DisplayName "VPS Security - RDP block $address ($protocol)" `
-        -Group $firewallGroup `
-        -Direction Inbound `
-        -Action Block `
-        -Enabled True `
-        -Profile Any `
-        -Protocol $protocol `
-        -LocalPort $protectedPorts `
-        -RemoteAddress $address | Out-Null
-    }
+    Protect-RdpGuardAddress -Address $address -Ports $protectedPorts
     $offenses[$address] = @{ count = $offenseCount; lastBanAt = $now.ToString('o') }
     $bans[$address] = @{
       permanent = $isPermanent
@@ -1658,7 +1921,7 @@ try {
   Write-GuardLog "运行失败：$($_.Exception.Message)"
   exit 1
 } finally {
-  $mutex.ReleaseMutex()
+  if ($mutexAcquired) { $mutex.ReleaseMutex() }
   $mutex.Dispose()
 }
 '@
@@ -1676,52 +1939,57 @@ function Install-RdpGuard {
   )
 
   if (-not $PSCmdlet.ShouldProcess("RDP 端口 $Port", '安装 RDP Guard 自动封禁')) { return }
-  Write-Title '安装事件驱动的 RDP Guard'
-  Protect-DataDirectory
-  Set-Content -LiteralPath $script:GuardPath -Value (Get-RdpGuardSource) -Encoding UTF8
-  $policy = Get-RdpGuardEscalationPolicy -InitialBanMinutes $BlockMinutes
+  $guardMutex = Enter-RdpGuardMutex
+  try {
+    Write-Title '安装事件驱动的 RDP Guard'
+    Protect-DataDirectory
+    Set-Content -LiteralPath $script:GuardPath -Value (Get-RdpGuardSource) -Encoding UTF8
+    $policy = Get-RdpGuardEscalationPolicy -InitialBanMinutes $BlockMinutes
 
-  $config = [ordered]@{
-    rdpPort = $Port
-    protectedPorts = @($ProtectedPorts | Select-Object -Unique)
-    trustedAddresses = @($TrustedAddresses)
-    threshold = $Threshold
-    windowMinutes = $WindowMinutes
-    banMinutes = $BlockMinutes
-    offenseWindowDays = $policy.OffenseWindowDays
-    banDurationsMinutes = @($policy.BanDurationsMinutes)
-    permanentAfter = $policy.PermanentAfter
+    $config = [ordered]@{
+      rdpPort = $Port
+      protectedPorts = @($ProtectedPorts | Select-Object -Unique)
+      trustedAddresses = @($TrustedAddresses)
+      threshold = $Threshold
+      windowMinutes = $WindowMinutes
+      banMinutes = $BlockMinutes
+      offenseWindowDays = $policy.OffenseWindowDays
+      banDurationsMinutes = @($policy.BanDurationsMinutes)
+      permanentAfter = $policy.PermanentAfter
+    }
+    $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $script:GuardConfigPath -Encoding UTF8
+
+    Invoke-NativeCommand -FilePath 'auditpol.exe' -ArgumentList @(
+      '/set', "/subcategory:$($script:AuditLogonGuid)", '/failure:enable'
+    ) | Out-Null
+
+    $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $taskCommand = "`"$powerShellPath`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$($script:GuardPath)`""
+    Invoke-NativeCommand -FilePath 'schtasks.exe' -ArgumentList @(
+      '/Create', '/TN', $script:GuardTaskName,
+      '/SC', 'ONEVENT', '/EC', 'Security',
+      '/MO', '*[System[(EventID=4625)]]',
+      '/TR', $taskCommand,
+      '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
+    ) | Out-Null
+    Invoke-NativeCommand -FilePath 'schtasks.exe' -ArgumentList @(
+      '/Create', '/TN', $script:GuardCleanupTaskName,
+      '/SC', 'MINUTE', '/MO', '5',
+      '/TR', $taskCommand,
+      '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
+    ) | Out-Null
+
+    $taskSettings = New-ScheduledTaskSettingsSet `
+      -MultipleInstances IgnoreNew `
+      -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
+      -StartWhenAvailable
+    Set-ScheduledTask -TaskName $script:GuardTaskName -Settings $taskSettings | Out-Null
+    Set-ScheduledTask -TaskName $script:GuardCleanupTaskName -Settings $taskSettings | Out-Null
+
+    Write-Success "RDP Guard 已启用：$WindowMinutes 分钟内失败 $Threshold 次；$(Get-RdpGuardEscalationSummary -Policy $policy)"
+  } finally {
+    Exit-RdpGuardMutex -Mutex $guardMutex
   }
-  $config | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $script:GuardConfigPath -Encoding UTF8
-
-  Invoke-NativeCommand -FilePath 'auditpol.exe' -ArgumentList @(
-    '/set', "/subcategory:$($script:AuditLogonGuid)", '/failure:enable'
-  ) | Out-Null
-
-  $powerShellPath = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-  $taskCommand = "`"$powerShellPath`" -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$($script:GuardPath)`""
-  Invoke-NativeCommand -FilePath 'schtasks.exe' -ArgumentList @(
-    '/Create', '/TN', $script:GuardTaskName,
-    '/SC', 'ONEVENT', '/EC', 'Security',
-    '/MO', '*[System[(EventID=4625)]]',
-    '/TR', $taskCommand,
-    '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
-  ) | Out-Null
-  Invoke-NativeCommand -FilePath 'schtasks.exe' -ArgumentList @(
-    '/Create', '/TN', $script:GuardCleanupTaskName,
-    '/SC', 'MINUTE', '/MO', '5',
-    '/TR', $taskCommand,
-    '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
-  ) | Out-Null
-
-  $taskSettings = New-ScheduledTaskSettingsSet `
-    -MultipleInstances Queue `
-    -ExecutionTimeLimit (New-TimeSpan -Minutes 2) `
-    -StartWhenAvailable
-  Set-ScheduledTask -TaskName $script:GuardTaskName -Settings $taskSettings | Out-Null
-  Set-ScheduledTask -TaskName $script:GuardCleanupTaskName -Settings $taskSettings | Out-Null
-
-  Write-Success "RDP Guard 已启用：$WindowMinutes 分钟内失败 $Threshold 次；$(Get-RdpGuardEscalationSummary -Policy $policy)"
 }
 
 function Remove-RdpGuard {
@@ -1729,13 +1997,18 @@ function Remove-RdpGuard {
   param()
 
   if (-not $PSCmdlet.ShouldProcess($script:DataRoot, '移除 RDP Guard 配置、计划任务和封禁规则')) { return }
-  Unregister-ScheduledTask -TaskName $script:GuardTaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Unregister-ScheduledTask -TaskName $script:GuardCleanupTaskName -Confirm:$false -ErrorAction SilentlyContinue
-  Get-NetFirewallRule -Name 'VpsSecurity-RdpBlock-*' -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $script:GuardPath -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $script:GuardConfigPath -Force -ErrorAction SilentlyContinue
-  Remove-Item -LiteralPath $script:GuardStatePath -Force -ErrorAction SilentlyContinue
+  $guardMutex = Enter-RdpGuardMutex
+  try {
+    Unregister-ScheduledTask -TaskName $script:GuardTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Unregister-ScheduledTask -TaskName $script:GuardCleanupTaskName -Confirm:$false -ErrorAction SilentlyContinue
+    Get-NetFirewallRule -Name 'VpsSecurity-RdpBlock-*' -ErrorAction SilentlyContinue |
+      Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:GuardPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:GuardConfigPath -Force -ErrorAction SilentlyContinue
+    Remove-Item -LiteralPath $script:GuardStatePath -Force -ErrorAction SilentlyContinue
+  } finally {
+    Exit-RdpGuardMutex -Mutex $guardMutex
+  }
 }
 
 function Set-RdpFirewallRule {
@@ -1838,12 +2111,34 @@ function Get-WindowsUpdateStatus {
   }
 }
 
+function Get-SystemDriveStatus {
+  $systemDriveId = if ($env:SystemDrive) { $env:SystemDrive } else { 'C:' }
+  $drive = Get-CimInstance `
+    -ClassName Win32_LogicalDisk `
+    -Filter "DeviceID='$systemDriveId'" `
+    -ErrorAction SilentlyContinue
+  if (-not $drive) { return $null }
+
+  return [pscustomobject]@{
+    DeviceId = $systemDriveId
+    FreeGiB = [Math]::Round(([double]$drive.FreeSpace / 1GB), 1)
+    SizeGiB = [Math]::Round(([double]$drive.Size / 1GB), 1)
+  }
+}
+
 function Show-WindowsUpdateStatus {
   Assert-SupportedWindows
   $status = Get-WindowsUpdateStatus
+  $systemDrive = Get-SystemDriveStatus
   Write-Title 'Windows Update 状态'
   Write-Output "自动更新策略：$(if ($status.PolicyDisablesAutomaticUpdates) { '已由本脚本禁用（NoAutoUpdate=1）' } else { '未由本脚本禁用' })"
   Write-Output "Windows Update 服务：启动类型 $($status.ServiceStartMode)，当前状态 $($status.ServiceState)"
+  if ($systemDrive) {
+    Write-Output "系统盘：剩余 $($systemDrive.FreeGiB) GiB / 共 $($systemDrive.SizeGiB) GiB"
+    if ($systemDrive.FreeGiB -lt 8) {
+      Write-WarningLine '系统盘剩余空间较少；请在更新前创建快照并预留足够空间。脚本不会自动禁用更新。'
+    }
+  }
   if ($status.PolicyDisablesAutomaticUpdates) {
     Write-WarningLine '安全更新将不再自动下载或安装。请自行安排手动更新，并保留足够磁盘空间。'
   }
@@ -1965,25 +2260,30 @@ function Remove-RdpGuardBan {
   $canonicalAddress = $parsedAddress.ToString()
   if (-not $PSCmdlet.ShouldProcess($canonicalAddress, '解除 RDP Guard 封禁并清除其阶梯计数')) { return }
 
-  $suffix = Get-RdpGuardRuleSuffix -Address $canonicalAddress
-  Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
-    Remove-NetFirewallRule -ErrorAction SilentlyContinue
+  $guardMutex = Enter-RdpGuardMutex
+  try {
+    $suffix = Get-RdpGuardRuleSuffix -Address $canonicalAddress
+    Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
+      Remove-NetFirewallRule -ErrorAction SilentlyContinue
 
-  if (Test-Path -LiteralPath $script:GuardStatePath) {
-    $state = Get-Content -LiteralPath $script:GuardStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-    if ($state.PSObject.Properties.Name -contains 'bans' -and $state.bans) {
-      $state.bans.PSObject.Properties.Remove($canonicalAddress)
+    if (Test-Path -LiteralPath $script:GuardStatePath) {
+      $state = Get-Content -LiteralPath $script:GuardStatePath -Raw -Encoding UTF8 | ConvertFrom-Json
+      if ($state.PSObject.Properties.Name -contains 'bans' -and $state.bans) {
+        $state.bans.PSObject.Properties.Remove($canonicalAddress)
+      }
+      if ($state.PSObject.Properties.Name -contains 'offenses' -and $state.offenses) {
+        $state.offenses.PSObject.Properties.Remove($canonicalAddress)
+      }
+      $temporary = "$($script:GuardStatePath).tmp"
+      try {
+        $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        Move-Item -LiteralPath $temporary -Destination $script:GuardStatePath -Force
+      } finally {
+        Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+      }
     }
-    if ($state.PSObject.Properties.Name -contains 'offenses' -and $state.offenses) {
-      $state.offenses.PSObject.Properties.Remove($canonicalAddress)
-    }
-    $temporary = "$($script:GuardStatePath).tmp"
-    try {
-      $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8
-      Move-Item -LiteralPath $temporary -Destination $script:GuardStatePath -Force
-    } finally {
-      Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
-    }
+  } finally {
+    Exit-RdpGuardMutex -Mutex $guardMutex
   }
   Write-Success "已解除 $canonicalAddress 的 RDP Guard 封禁，并清除其阶梯封禁计数"
 }
@@ -2023,19 +2323,73 @@ function Show-SecurityStatus {
   $guardTask = Get-ScheduledTask -TaskName $script:GuardTaskName -ErrorAction SilentlyContinue
   $telegramTask = Get-ScheduledTask -TaskName $script:TelegramLoginTaskName -ErrorAction SilentlyContinue
   $telegramConfigured = Test-Path -LiteralPath $script:TelegramConfigPath
+  $guardTaskInfo = if ($guardTask) {
+    Get-ScheduledTaskInfo -TaskName $script:GuardTaskName -ErrorAction SilentlyContinue
+  } else { $null }
+  $telegramTaskInfo = if ($telegramTask) {
+    Get-ScheduledTaskInfo -TaskName $script:TelegramLoginTaskName -ErrorAction SilentlyContinue
+  } else { $null }
+  $managedRdpRules = @(Get-NetFirewallRule -Name 'VpsSecurity-RdpAllow-*' -ErrorAction SilentlyContinue)
+  $managedRemoteAddresses = @(
+    $managedRdpRules |
+      Get-NetFirewallAddressFilter -ErrorAction SilentlyContinue |
+      ForEach-Object { @($_.RemoteAddress) } |
+      Select-Object -Unique
+  )
+  $tcpListening = [bool](Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue)
+  $udpListening = [bool](Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue)
+  $firewallConflicts = @()
+  if ($managedRemoteAddresses.Count -gt 0 -and
+      -not ($managedRemoteAddresses | Where-Object { [string]$_ -match '^(?i:any|\*)$' })) {
+    try {
+      $firewallConflicts = @(Get-RdpFirewallConflict -Port $port)
+    } catch {
+      Write-WarningLine "无法检查 RDP 白名单冲突：$($_.Exception.Message)"
+    }
+  }
+  $systemDrive = Get-SystemDriveStatus
+  $defenderStatus = if (Get-Command Get-MpComputerStatus -ErrorAction SilentlyContinue) {
+    Get-MpComputerStatus -ErrorAction SilentlyContinue
+  } else { $null }
 
   Write-Title 'Windows 11 VPS 当前状态'
   Write-Output "系统：$($currentVersion.ProductName)（Build $($currentVersion.CurrentBuildNumber)）"
   Write-Output "RDP：$(if ($deny -eq 0) { '已启用' } else { '未启用' })"
   Write-Output "RDP 端口：$port"
+  Write-Output "RDP 监听：TCP $(if ($tcpListening) { '正常' } else { '未监听' })；UDP $(if ($udpListening) { '正常' } else { '未监听' })"
   Write-Output "NLA：$(if ($nla -eq 1) { '已要求' } else { '未要求' })"
   Write-Output "RDP Guard：$(if ($guardTask) { $guardTask.State } else { '未安装' })"
+  if ($guardTaskInfo) {
+    Write-Output "RDP Guard 最近运行：$($guardTaskInfo.LastRunTime)；结果：$($guardTaskInfo.LastTaskResult)"
+  }
   Write-Output "Telegram：$(if ($telegramConfigured -and $telegramTask) { "已配置（任务 $($telegramTask.State)）" } else { '未启用' })"
+  if ($telegramTaskInfo) {
+    Write-Output "Telegram 最近运行：$($telegramTaskInfo.LastRunTime)；结果：$($telegramTaskInfo.LastTaskResult)"
+  }
   $windowsUpdateStatus = Get-WindowsUpdateStatus
   Write-Output "Windows 自动更新：$(if ($windowsUpdateStatus.PolicyDisablesAutomaticUpdates) { '已禁用' } else { '未由本脚本禁用' })"
+  if ($systemDrive) {
+    Write-Output "系统盘：剩余 $($systemDrive.FreeGiB) GiB / 共 $($systemDrive.SizeGiB) GiB"
+  }
+  if ($defenderStatus) {
+    Write-Output "Defender：防病毒 $(if ($defenderStatus.AntivirusEnabled) { '开启' } else { '关闭' })；实时保护 $(if ($defenderStatus.RealTimeProtectionEnabled) { '开启' } else { '关闭' })；签名时间 $($defenderStatus.AntivirusSignatureLastUpdated)"
+    if (-not $defenderStatus.AntivirusEnabled -or -not $defenderStatus.RealTimeProtectionEnabled) {
+      Write-WarningLine 'Microsoft Defender 防病毒或实时保护未开启；如未安装其他安全软件，请检查原因。'
+    }
+  }
   Write-Host ''
   Write-Output '防火墙配置：'
   $profiles | Format-Table -AutoSize
+  Write-Output "本脚本 RDP 来源：$(if ($managedRemoteAddresses.Count) { $managedRemoteAddresses -join ', ' } else { '未找到规则' })"
+  if ($firewallConflicts.Count -gt 0) {
+    Write-WarningLine '发现可能绕过当前 RDP 来源白名单的其他入站放行规则：'
+    $firewallConflicts |
+      Select-Object DisplayName, Name, Protocol, LocalPort, RemoteAddress, Program, Service |
+      Format-Table -Wrap -AutoSize
+  } elseif ($managedRemoteAddresses.Count -gt 0 -and
+      -not ($managedRemoteAddresses | Where-Object { [string]$_ -match '^(?i:any|\*)$' })) {
+    Write-Success '未发现明显绕过当前 RDP 来源白名单的宽泛规则'
+  }
   Write-Output '本脚本管理的规则：'
   if ($rules) { $rules | Format-Table -AutoSize } else { Write-Output '  无' }
   Show-RdpGuardBanStatus
@@ -2151,6 +2505,7 @@ function Invoke-Apply {
     }
   }
 
+  Assert-NoRdpFirewallConflict -Port $targetPort -RemoteAddresses $remoteAddresses
   $telegram = Confirm-TelegramConfiguration -Telegram $telegram
   $backupPath = Save-SecurityBackup
   try {
