@@ -890,19 +890,19 @@ function Assert-LocalFirewallRulesUsable {
   if ($profiles.Count -eq 0) {
     Write-TerminatingError '无法读取 Windows 防火墙有效配置。'
   }
-  foreach ($profile in $profiles) {
-    if ([string]$profile.AllowInboundRules -eq 'False') {
-      Write-TerminatingError "防火墙配置文件 $($profile.Name) 禁止所有入站允许规则，脚本创建的 RDP 规则不会生效。"
+  foreach ($firewallProfile in $profiles) {
+    if ([string]$firewallProfile.AllowInboundRules -eq 'False') {
+      Write-TerminatingError "防火墙配置文件 $($firewallProfile.Name) 禁止所有入站允许规则，脚本创建的 RDP 规则不会生效。"
     }
-    if ([string]$profile.AllowLocalFirewallRules -eq 'False') {
-      Write-TerminatingError "防火墙配置文件 $($profile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效；请先修正组策略/MDM。"
+    if ([string]$firewallProfile.AllowLocalFirewallRules -eq 'False') {
+      Write-TerminatingError "防火墙配置文件 $($firewallProfile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效；请先修正组策略/MDM。"
     }
     if ($VerifyHardenedState) {
-      if ([string]$profile.Enabled -eq 'False') {
-        Write-TerminatingError "防火墙配置文件 $($profile.Name) 仍处于关闭状态。"
+      if ([string]$firewallProfile.Enabled -eq 'False') {
+        Write-TerminatingError "防火墙配置文件 $($firewallProfile.Name) 仍处于关闭状态。"
       }
-      if ([string]$profile.DefaultInboundAction -eq 'Allow') {
-        Write-TerminatingError "防火墙配置文件 $($profile.Name) 的默认入站操作仍为 Allow。"
+      if ([string]$firewallProfile.DefaultInboundAction -eq 'Allow') {
+        Write-TerminatingError "防火墙配置文件 $($firewallProfile.Name) 的默认入站操作仍为 Allow。"
       }
     }
   }
@@ -2602,15 +2602,15 @@ function Show-SecurityStatus {
   Write-Host ''
   Write-Output '防火墙配置：'
   $profiles | Format-Table -AutoSize
-  foreach ($profile in @($profiles)) {
-    if ([string]$profile.Enabled -eq 'False' -or [string]$profile.DefaultInboundAction -eq 'Allow') {
-      Write-WarningLine "防火墙配置文件 $($profile.Name) 未处于脚本要求的启用/默认阻止入站状态。"
+  foreach ($firewallProfile in @($profiles)) {
+    if ([string]$firewallProfile.Enabled -eq 'False' -or [string]$firewallProfile.DefaultInboundAction -eq 'Allow') {
+      Write-WarningLine "防火墙配置文件 $($firewallProfile.Name) 未处于脚本要求的启用/默认阻止入站状态。"
     }
-    if ([string]$profile.AllowInboundRules -eq 'False') {
-      Write-WarningLine "防火墙配置文件 $($profile.Name) 禁止所有入站允许规则，RDP 放行规则不会生效。"
+    if ([string]$firewallProfile.AllowInboundRules -eq 'False') {
+      Write-WarningLine "防火墙配置文件 $($firewallProfile.Name) 禁止所有入站允许规则，RDP 放行规则不会生效。"
     }
-    if ([string]$profile.AllowLocalFirewallRules -eq 'False') {
-      Write-WarningLine "防火墙配置文件 $($profile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效。"
+    if ([string]$firewallProfile.AllowLocalFirewallRules -eq 'False') {
+      Write-WarningLine "防火墙配置文件 $($firewallProfile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效。"
     }
   }
   Write-Output "本脚本 RDP 来源：$(if ($managedRemoteAddresses.Count) { $managedRemoteAddresses -join ', ' } else { '未找到规则' })"
