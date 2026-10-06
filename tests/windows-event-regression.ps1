@@ -168,9 +168,12 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     $event
   })
   $global:ciNewFirewallRuleCalls = 0
+  $global:ciRemoveFirewallRuleCalls = 0
+  $global:ciFirewallRuleExists = $false
   function global:Get-NetFirewallRule {
     [CmdletBinding()]
     param([Parameter(ValueFromRemainingArguments = $true)]$Remaining)
+    if ($global:ciFirewallRuleExists) { return [pscustomobject]@{ Name = 'CI-existing-rule' } }
   }
   function global:New-NetFirewallRule {
     [CmdletBinding()]
@@ -180,7 +183,11 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   }
   function global:Remove-NetFirewallRule {
     [CmdletBinding()]
-    param([Parameter(ValueFromRemainingArguments = $true)]$Remaining)
+    param(
+      [Parameter(ValueFromPipeline)]$InputObject,
+      [Parameter(ValueFromRemainingArguments = $true)]$Remaining
+    )
+    process { $global:ciRemoveFirewallRuleCalls++ }
   }
   & $guardPath
   $guardState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
@@ -248,6 +255,48 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   $global:ciEvents = @()
   & $guardPath
   $null = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+
+  # Adding an address to the whitelist must remove an older explicit block;
+  # otherwise Windows Firewall block precedence would lock out the trusted IP.
+  $trustedAddress = '198.51.100.11'
+  $guardConfigPath = Join-Path $dataRoot 'rdp-guard.json'
+  $guardConfig = Get-Content -LiteralPath $guardConfigPath -Raw | ConvertFrom-Json
+  $guardConfig.trustedAddresses = @('198.51.100.11/32')
+  $guardConfig | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $guardConfigPath -Encoding UTF8
+  @{
+    bans = @{
+      $trustedAddress = @{
+        permanent = $true
+        expiresAt = $null
+        offenseCount = 5
+      }
+      'not-an-ip' = @{
+        permanent = $true
+        expiresAt = $null
+        offenseCount = 5
+      }
+    }
+    offenses = @{
+      $trustedAddress = @{ count = 5; lastBanAt = (Get-Date).ToString('o') }
+      'not-an-ip' = @{ count = 5; lastBanAt = (Get-Date).ToString('o') }
+    }
+  } | ConvertTo-Json -Depth 5 |
+    Set-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Encoding UTF8
+  $global:ciEvents = @()
+  $global:ciFirewallRuleExists = $true
+  $global:ciRemoveFirewallRuleCalls = 0
+  & $guardPath
+  $trustedState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+  if ($trustedState.bans.PSObject.Properties[$trustedAddress] -or
+      $trustedState.offenses.PSObject.Properties[$trustedAddress] -or
+      $trustedState.bans.PSObject.Properties['not-an-ip'] -or
+      $trustedState.offenses.PSObject.Properties['not-an-ip'] -or
+      $global:ciRemoveFirewallRuleCalls -lt 1) {
+    throw "RDP Guard did not remove a newly trusted or invalid saved address: $($trustedState | ConvertTo-Json -Depth 5 -Compress)"
+  }
+  $global:ciFirewallRuleExists = $false
+  $guardConfig.trustedAddresses = @()
+  $guardConfig | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $guardConfigPath -Encoding UTF8
 
   # The accumulation window must outlive the 30-day fourth ban so that a
   # fifth offense can actually become permanent after that ban expires.
@@ -335,6 +384,17 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 1) {
     throw 'An unmanaged allow rule for a different source was not reported as a whitelist conflict.'
   }
+  $multiPortConflictCaught = $false
+  try {
+    $null = Assert-NoRdpFirewallConflict `
+      -Port @(3389, 44756) `
+      -RemoteAddresses @('203.0.113.10/32')
+  } catch {
+    $multiPortConflictCaught = $true
+  }
+  if (-not $multiPortConflictCaught) {
+    throw 'Whitelist conflict validation did not inspect both the current and target RDP ports.'
+  }
 
   $bootstrapDefinition = Get-Content -LiteralPath $BootstrapPath -Raw -Encoding UTF8
   if ($bootstrapDefinition -match '-MultipleInstances Queue' -or
@@ -383,7 +443,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   }
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Variable `
-    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls `
+    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls,ciRemoveFirewallRuleCalls,ciFirewallRuleExists `
     -Scope Global `
     -ErrorAction SilentlyContinue
 }
