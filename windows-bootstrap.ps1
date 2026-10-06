@@ -80,7 +80,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.8'
+$script:ScriptVersion = 'v1.4.9'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -97,6 +97,7 @@ $script:TelegramLoginStatePath = Join-Path $script:DataRoot 'telegram-rdp-login-
 $script:TelegramLoginTaskName = 'VpsSecurityBootstrap-Telegram-RdpLogin'
 $script:TelegramLoginCleanupTaskName = 'VpsSecurityBootstrap-Telegram-RdpLogin-Cleanup'
 $script:FirewallGroup = 'VpsSecurityBootstrap'
+$script:LocalFirewallRulesRegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules'
 $script:RdpRegistryPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server\WinStations\RDP-Tcp'
 $script:TerminalServerPath = 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server'
 $script:TerminalServerPolicyPath = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows NT\Terminal Services'
@@ -801,6 +802,66 @@ function Test-FirewallLocalPortMatch {
   return $false
 }
 
+function Get-FirewallPackageIdentityFromDefinition {
+  param([AllowEmptyString()][string]$Definition)
+
+  if ([string]::IsNullOrWhiteSpace($Definition)) { return $null }
+  $match = [regex]::Match(
+    $Definition,
+    '(?:^|\|)(?:PFN|AppPkgId)=(?<Identity>[^|]+)(?:\||$)',
+    [Text.RegularExpressions.RegexOptions]::IgnoreCase
+  )
+  if (-not $match.Success) { return $null }
+
+  $identity = $match.Groups['Identity'].Value.Trim()
+  if ([string]::IsNullOrWhiteSpace($identity) -or $identity -match '^(?i:any|\*)$') {
+    return $null
+  }
+  return $identity
+}
+
+function Get-LocalFirewallRuleDefinition {
+  param([Parameter(Mandatory)][string]$Name)
+
+  try {
+    return [string](Get-ItemPropertyValue `
+      -LiteralPath $script:LocalFirewallRulesRegistryPath `
+      -Name $Name `
+      -ErrorAction Stop)
+  } catch {
+    Write-Verbose "无法读取本机防火墙规则 $Name 的原始定义：$($_.Exception.Message)"
+    return ''
+  }
+}
+
+function Test-FirewallRuleHasPackageConstraint {
+  param(
+    [Parameter(Mandatory)][object]$Rule,
+    [Parameter(Mandatory)][AllowEmptyCollection()][object[]]$ApplicationFilters
+  )
+
+  $packages = @(
+    $ApplicationFilters |
+      ForEach-Object {
+        if ($_.PSObject.Properties.Name -contains 'Package') { @($_.Package) }
+      } |
+      Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_) -and
+        [string]$_ -notmatch '^(?i:any|\*)$'
+      }
+  )
+  if ($packages.Count -gt 0) { return $true }
+
+  # Windows 11 can omit the Package property for generated AppContainer
+  # *-In-Allow-ServerCapability rules even though their local policy value has
+  # an explicit PFN. Trust that fallback only for a rule sourced from the local
+  # policy store; a GPO/MDM rule with the same name must remain fail-closed.
+  if ([string]$Rule.PolicyStoreSourceType -ne 'Local') { return $false }
+  $definition = Get-LocalFirewallRuleDefinition -Name ([string]$Rule.Name)
+  $identity = Get-FirewallPackageIdentityFromDefinition -Definition $definition
+  return -not [string]::IsNullOrWhiteSpace($identity)
+}
+
 function Get-RdpFirewallConflict {
   param([Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port)
 
@@ -823,7 +884,6 @@ function Get-RdpFirewallConflict {
     $addressFilters = @($rule | Get-NetFirewallAddressFilter -ErrorAction Stop)
     $applicationFilters = @($rule | Get-NetFirewallApplicationFilter -ErrorAction Stop)
     $serviceFilters = @($rule | Get-NetFirewallServiceFilter -ErrorAction Stop)
-
     $remoteAddresses = @($addressFilters | ForEach-Object { @($_.RemoteAddress) })
 
     $programs = @($applicationFilters | ForEach-Object { @($_.Program) })
@@ -839,12 +899,22 @@ function Get-RdpFirewallConflict {
     })
     if (-not $programCanHostRdp -or -not $serviceCanHostRdp) { continue }
 
-    foreach ($portFilter in $portFilters) {
-      $protocol = [string]$portFilter.Protocol
-      if ($protocol -notmatch '^(?i:any|tcp|udp|6|17|256)$') { continue }
-      if (-not (Test-FirewallLocalPortMatch -LocalPort @($portFilter.LocalPort) -Port $Port)) {
-        continue
+    $matchingPortFilters = @(
+      foreach ($portFilter in $portFilters) {
+        $protocol = [string]$portFilter.Protocol
+        if ($protocol -notmatch '^(?i:any|tcp|udp|6|17|256)$') { continue }
+        if (Test-FirewallLocalPortMatch -LocalPort @($portFilter.LocalPort) -Port $Port) {
+          $portFilter
+        }
       }
+    )
+    if ($matchingPortFilters.Count -eq 0) { continue }
+    if (Test-FirewallRuleHasPackageConstraint -Rule $rule -ApplicationFilters $applicationFilters) {
+      continue
+    }
+
+    foreach ($portFilter in $matchingPortFilters) {
+      $protocol = [string]$portFilter.Protocol
       $conflicts.Add([pscustomobject]@{
         Name = [string]$rule.Name
         DisplayName = [string]$rule.DisplayName
