@@ -154,7 +154,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     threshold = 5
     windowMinutes = 5
     banMinutes = 1440
-    offenseWindowDays = 30
+    offenseWindowDays = 90
     banDurationsMinutes = @(1440, 4320, 10080, 43200)
     permanentAfter = 5
   } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard.json') -Encoding UTF8
@@ -196,6 +196,92 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   & $guardPath
   if ($global:ciNewFirewallRuleCalls -ne 2) {
     throw "RDP Guard did not repair both missing block rules for an active ban: $global:ciNewFirewallRuleCalls"
+  }
+
+  # Windows 11 NLA can reject an RDP credential before a RemoteInteractive
+  # session exists. The observed event is type 3 / NtLmSsp / NTLM / IpPort 0.
+  Remove-Item -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Force
+  $guardNlaEventXml = '<Event><EventData><Data Name="TargetUserName">Administrator</Data><Data Name="LogonType">3</Data><Data Name="Status">0xc000006d</Data><Data Name="SubStatus">0xc000006a</Data><Data Name="LogonProcessName">NtLmSsp</Data><Data Name="AuthenticationPackageName">NTLM</Data><Data Name="IpAddress">198.51.100.7</Data><Data Name="IpPort">0</Data><Data Name="WorkstationName">B_204</Data></EventData></Event>'
+  $global:ciGuardEventXml = $guardNlaEventXml
+  $global:ciEvents = @(1..5 | ForEach-Object {
+    $event = [pscustomobject]@{ RecordId = [long]$_; TimeCreated = Get-Date }
+    $event | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $global:ciGuardEventXml }
+    $event
+  })
+  $global:ciNewFirewallRuleCalls = 0
+  & $guardPath
+  $nlaState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+  $nlaProperty = $nlaState.bans.PSObject.Properties['198.51.100.7']
+  $nlaBan = if ($nlaProperty) { $nlaProperty.Value } else { $null }
+  if ($null -eq $nlaBan -or $global:ciNewFirewallRuleCalls -ne 2) {
+    throw "RDP Guard did not block the Windows 11 NLA-shaped type 3 failures: $($nlaState | ConvertTo-Json -Depth 5 -Compress)"
+  }
+
+  # A normal network logon has a real remote source port. It must not be
+  # treated as RDP merely because it also uses type 3 and NTLM.
+  Remove-Item -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Force
+  $guardSmbEventXml = '<Event><EventData><Data Name="TargetUserName">Administrator</Data><Data Name="LogonType">3</Data><Data Name="Status">0xc000006d</Data><Data Name="SubStatus">0xc000006a</Data><Data Name="LogonProcessName">NtLmSsp</Data><Data Name="AuthenticationPackageName">NTLM</Data><Data Name="IpAddress">198.51.100.8</Data><Data Name="IpPort">52144</Data><Data Name="WorkstationName">CLIENT</Data></EventData></Event>'
+  $global:ciGuardEventXml = $guardSmbEventXml
+  $global:ciNewFirewallRuleCalls = 0
+  & $guardPath
+  $smbState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+  $smbProperty = $smbState.bans.PSObject.Properties['198.51.100.8']
+  $smbBan = if ($smbProperty) { $smbProperty.Value } else { $null }
+  if ($null -ne $smbBan -or $global:ciNewFirewallRuleCalls -ne 0) {
+    throw "RDP Guard incorrectly treated an ordinary type 3 network logon as RDP: $($smbState | ConvertTo-Json -Depth 5 -Compress)"
+  }
+
+  # Missing source-port evidence is not enough to classify a generic type 3
+  # event as RDP. Only the observed Windows 11 NLA IpPort=0 shape is accepted.
+  Remove-Item -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Force
+  $global:ciGuardEventXml = '<Event><EventData><Data Name="TargetUserName">Administrator</Data><Data Name="LogonType">3</Data><Data Name="Status">0xc000006d</Data><Data Name="SubStatus">0xc000006a</Data><Data Name="LogonProcessName">NtLmSsp</Data><Data Name="AuthenticationPackageName">NTLM</Data><Data Name="IpAddress">198.51.100.10</Data><Data Name="IpPort" /></EventData></Event>'
+  $global:ciNewFirewallRuleCalls = 0
+  & $guardPath
+  $missingPortState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+  $missingPortProperty = $missingPortState.bans.PSObject.Properties['198.51.100.10']
+  if ($missingPortProperty -or $global:ciNewFirewallRuleCalls -ne 0) {
+    throw "RDP Guard accepted a type 3 event without the required IpPort=0 evidence: $($missingPortState | ConvertTo-Json -Depth 5 -Compress)"
+  }
+
+  # A damaged state must be replaced by a complete, parseable state file.
+  Set-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Value '{broken' -Encoding UTF8
+  $global:ciEvents = @()
+  & $guardPath
+  $null = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+
+  # The accumulation window must outlive the 30-day fourth ban so that a
+  # fifth offense can actually become permanent after that ban expires.
+  $escalationAddress = '198.51.100.9'
+  $escalationNow = Get-Date
+  @{
+    bans = @{
+      $escalationAddress = @{
+        permanent = $false
+        expiresAt = $escalationNow.AddMinutes(-1).ToString('o')
+        offenseCount = 4
+      }
+    }
+    offenses = @{
+      $escalationAddress = @{
+        count = 4
+        lastBanAt = $escalationNow.AddDays(-31).ToString('o')
+      }
+    }
+  } | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Encoding UTF8
+  $global:ciGuardEventXml = '<Event><EventData><Data Name="TargetUserName">Administrator</Data><Data Name="LogonType">10</Data><Data Name="Status">0xc000006d</Data><Data Name="SubStatus">0xc000006a</Data><Data Name="IpAddress">198.51.100.9</Data></EventData></Event>'
+  $global:ciEvents = @(1..5 | ForEach-Object {
+    $event = [pscustomobject]@{ RecordId = [long]$_; TimeCreated = Get-Date }
+    $event | Add-Member -MemberType ScriptMethod -Name ToXml -Value { $global:ciGuardEventXml }
+    $event
+  })
+  $global:ciNewFirewallRuleCalls = 0
+  & $guardPath
+  $permanentState = Get-Content -LiteralPath (Join-Path $dataRoot 'rdp-guard-state.json') -Raw | ConvertFrom-Json
+  $permanentProperty = $permanentState.bans.PSObject.Properties[$escalationAddress]
+  $permanentBan = if ($permanentProperty) { $permanentProperty.Value } else { $null }
+  if ($null -eq $permanentBan -or -not [bool]$permanentBan.permanent -or
+      [int]$permanentBan.offenseCount -ne 5 -or $global:ciNewFirewallRuleCalls -ne 2) {
+    throw "RDP Guard fifth offense did not become permanent: $($permanentState | ConvertTo-Json -Depth 5 -Compress)"
   }
 
   if (-not (Test-FirewallLocalPortMatch -LocalPort @('Any') -Port 44756) -or
@@ -254,6 +340,11 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   if ($bootstrapDefinition -match '-MultipleInstances Queue' -or
       ([regex]::Matches($bootstrapDefinition, '-MultipleInstances IgnoreNew')).Count -lt 2) {
     throw 'Event-driven Windows tasks must ignore duplicate triggers instead of queueing PowerShell instances.'
+  }
+  if ($bootstrapDefinition -notmatch '\[int\]\$BanThreshold = 3' -or
+      $bootstrapDefinition -notmatch "'/SC', 'MINUTE', '/MO', '1'" -or
+      $bootstrapDefinition -notmatch 'OffenseWindowDays = 90') {
+    throw 'RDP Guard must use three failures, a one-minute catch-up sweep, and a reachable permanent-ban window.'
   }
   $watcherSource = Get-TelegramLoginWatcherSource
   if ($watcherSource -notmatch 'EventRecordID > \$lastRecordId' -or
