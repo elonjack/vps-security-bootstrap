@@ -80,7 +80,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.7'
+$script:ScriptVersion = 'v1.4.8'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -554,6 +554,30 @@ function Get-CurrentRdpPort {
   }
 }
 
+function Get-PendingRdpPort {
+  try {
+    $ports = [Collections.Generic.List[int]]::new()
+    $rules = @(Get-NetFirewallRule -Name 'VpsSecurity-RdpAllow-Current-*' -ErrorAction SilentlyContinue)
+    foreach ($rule in $rules) {
+      foreach ($filter in @($rule | Get-NetFirewallPortFilter -ErrorAction Stop)) {
+        foreach ($entry in @($filter.LocalPort)) {
+          foreach ($part in ([string]$entry).Split(',')) {
+            $port = 0
+            if ([int]::TryParse($part.Trim(), [ref]$port) -and
+                $port -ge 1 -and $port -le 65535 -and
+                -not $ports.Contains($port)) {
+              $ports.Add($port)
+            }
+          }
+        }
+      }
+    }
+    return $ports.ToArray()
+  } catch {
+    Write-TerminatingError "无法读取待重启的旧 RDP 端口规则；为避免误删当前入口，已停止配置。原始错误：$($_.Exception.Message)"
+  }
+}
+
 function Get-ListeningLocalPort {
   try {
     $ipProperties = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties()
@@ -590,10 +614,10 @@ function Get-RandomAvailablePort {
 function Test-PortAvailable {
   param(
     [Parameter(Mandatory)][int]$Port,
-    [Parameter(Mandatory)][int]$CurrentPort
+    [Parameter(Mandatory)][int[]]$CurrentPort
   )
 
-  if ($Port -eq $CurrentPort) { return $true }
+  if ($Port -in $CurrentPort) { return $true }
   return $Port -notin @(Get-ListeningLocalPort)
 }
 
@@ -607,6 +631,9 @@ function Test-IpOrCidr {
 
   $address = $null
   if (-not [Net.IPAddress]::TryParse($parts[0], [ref]$address)) {
+    return $false
+  }
+  if ($address.Equals([Net.IPAddress]::Any) -or $address.Equals([Net.IPAddress]::IPv6Any)) {
     return $false
   }
   if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
@@ -627,7 +654,9 @@ function Test-IpOrCidr {
     return $false
   }
   $maxPrefix = if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
-  return $prefix -ge 0 -and $prefix -le $maxPrefix
+  # /0 is equivalent to every IPv4 or IPv6 address. Accepting it as a
+  # "whitelist" would create a dangerous false sense of source restriction.
+  return $prefix -ge 1 -and $prefix -le $maxPrefix
 }
 
 function Test-AddressInNetwork {
@@ -833,19 +862,50 @@ function Get-RdpFirewallConflict {
 
 function Assert-NoRdpFirewallConflict {
   param(
-    [Parameter(Mandatory)][ValidateRange(1, 65535)][int]$Port,
+    [Parameter(Mandatory)][ValidateRange(1, 65535)][int[]]$Port,
     [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RemoteAddresses
   )
 
   if ($RemoteAddresses.Count -eq 0) { return }
-  $conflicts = @(Get-RdpFirewallConflict -Port $Port)
+  $conflicts = @(
+    foreach ($checkedPort in @($Port | Select-Object -Unique)) {
+      foreach ($conflict in @(Get-RdpFirewallConflict -Port $checkedPort)) {
+        $conflict | Select-Object @{ Name = 'CheckedPort'; Expression = { $checkedPort } }, *
+      }
+    }
+  )
   if ($conflicts.Count -eq 0) { return }
 
-  Write-WarningLine "发现可能绕过端口 $Port 来源白名单的现有入站放行规则："
+  Write-WarningLine "发现可能绕过 RDP 来源白名单的现有入站放行规则："
   $conflicts |
-    Select-Object DisplayName, Name, Protocol, LocalPort, RemoteAddress, Program, Service, PolicyStoreSourceType |
+    Select-Object CheckedPort, DisplayName, Name, Protocol, LocalPort, RemoteAddress, Program, Service, PolicyStoreSourceType |
     Format-Table -Wrap -AutoSize
   Write-TerminatingError '为避免产生虚假的白名单安全感，系统尚未修改。请先禁用或收紧以上冲突规则，再重新运行。'
+}
+
+function Assert-LocalFirewallRulesUsable {
+  param([switch]$VerifyHardenedState)
+
+  $profiles = @(Get-NetFirewallProfile -PolicyStore ActiveStore -ErrorAction Stop)
+  if ($profiles.Count -eq 0) {
+    Write-TerminatingError '无法读取 Windows 防火墙有效配置。'
+  }
+  foreach ($profile in $profiles) {
+    if ([string]$profile.AllowInboundRules -eq 'False') {
+      Write-TerminatingError "防火墙配置文件 $($profile.Name) 禁止所有入站允许规则，脚本创建的 RDP 规则不会生效。"
+    }
+    if ([string]$profile.AllowLocalFirewallRules -eq 'False') {
+      Write-TerminatingError "防火墙配置文件 $($profile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效；请先修正组策略/MDM。"
+    }
+    if ($VerifyHardenedState) {
+      if ([string]$profile.Enabled -eq 'False') {
+        Write-TerminatingError "防火墙配置文件 $($profile.Name) 仍处于关闭状态。"
+      }
+      if ([string]$profile.DefaultInboundAction -eq 'Allow') {
+        Write-TerminatingError "防火墙配置文件 $($profile.Name) 的默认入站操作仍为 Allow。"
+      }
+    }
+  }
 }
 
 function Export-RegistryKeyBackup {
@@ -962,8 +1022,9 @@ function Save-SecurityBackup {
   Protect-DataDirectory
 
   $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
-  $backupPath = Join-Path $script:BackupRoot $stamp
-  New-Item -ItemType Directory -Path $backupPath -Force | Out-Null
+  $backupId = [guid]::NewGuid().ToString('N').Substring(0, 8)
+  $backupPath = Join-Path $script:BackupRoot "$stamp-$backupId"
+  New-Item -ItemType Directory -Path $backupPath | Out-Null
 
   Export-RegistryKeyBackup `
     -RegistryPath $script:TerminalServerPath `
@@ -1097,7 +1158,22 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 
 $backupPath = Split-Path -Parent $MyInvocation.MyCommand.Path
 $dataRoot = Split-Path -Parent (Split-Path -Parent $backupPath)
+$requiredBackupFiles = @('metadata.json', 'firewall.wfw', 'security-policy.inf', 'audit-policy.csv')
+foreach ($requiredName in $requiredBackupFiles) {
+  $requiredPath = Join-Path $backupPath $requiredName
+  if (-not (Test-Path -LiteralPath $requiredPath -PathType Leaf)) {
+    throw "备份不完整，缺少必需文件：$requiredName。系统尚未修改。"
+  }
+  $requiredItem = Get-Item -LiteralPath $requiredPath -Force
+  if ($requiredItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
+    throw "备份文件不能是链接或重解析点：$requiredName。系统尚未修改。"
+  }
+}
 $metadata = Get-Content -LiteralPath (Join-Path $backupPath 'metadata.json') -Raw -Encoding UTF8 | ConvertFrom-Json
+if (-not ($metadata.PSObject.Properties.Name -contains 'rdpPort') -or
+    [int]$metadata.rdpPort -lt 1 -or [int]$metadata.rdpPort -gt 65535) {
+  throw '备份 metadata.json 中的 RDP 端口无效。系统尚未修改。'
+}
 Unregister-ScheduledTask -TaskName 'VpsSecurityBootstrap-RdpGuard' -Confirm:$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'VpsSecurityBootstrap-RdpGuard-Cleanup' -Confirm:$false -ErrorAction SilentlyContinue
 Unregister-ScheduledTask -TaskName 'VpsSecurityBootstrap-RdpPort-Cleanup' -Confirm:$false -ErrorAction SilentlyContinue
@@ -1262,13 +1338,14 @@ Remove-Item -LiteralPath $scriptPath -Force -ErrorAction SilentlyContinue
 
 function Install-RdpPortCleanup {
   param(
-    [Parameter(Mandatory)][int]$CurrentPort,
+    [Parameter(Mandatory)][int[]]$CurrentPort,
     [Parameter(Mandatory)][int]$TargetPort
   )
 
   Unregister-ScheduledTask -TaskName $script:RdpPortCleanupTaskName -Confirm:$false -ErrorAction SilentlyContinue
   Remove-Item -LiteralPath $script:RdpPortCleanupPath -Force -ErrorAction SilentlyContinue
-  if ($CurrentPort -eq $TargetPort) { return }
+  $oldPorts = @($CurrentPort | Where-Object { $_ -ne $TargetPort } | Select-Object -Unique)
+  if ($oldPorts.Count -eq 0) { return }
 
   Protect-DataDirectory
   Set-Content -LiteralPath $script:RdpPortCleanupPath -Value (Get-RdpPortCleanupSource) -Encoding UTF8
@@ -1280,7 +1357,7 @@ function Install-RdpPortCleanup {
     '/TR', $taskCommand,
     '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
   ) | Out-Null
-  Write-Info "重启后将自动删除旧 RDP 端口 $CurrentPort 的临时放行规则。"
+  Write-Info "重启后将自动删除旧 RDP 端口 $($oldPorts -join ', ') 的临时放行规则。"
 }
 
 function Get-TelegramNotifierSource {
@@ -1415,9 +1492,15 @@ function Write-ErrorLog {
 
 function Save-State {
   param([long]$RecordId)
-  $temporary = "$statePath.tmp"
-  @{ lastRecordId = $RecordId } | ConvertTo-Json | Set-Content -LiteralPath $temporary -Encoding UTF8
-  Move-Item -LiteralPath $temporary -Destination $statePath -Force
+  $temporary = "$statePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    $json = @{ lastRecordId = $RecordId } | ConvertTo-Json
+    $null = $json | ConvertFrom-Json
+    Set-Content -LiteralPath $temporary -Value $json -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $statePath -Force
+  } finally {
+    Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
+  }
 }
 
 function ConvertFrom-SecurityEvent {
@@ -1699,6 +1782,35 @@ function Test-TrustedAddress {
   return $false
 }
 
+function Test-TrustedNetworkDefinition {
+  param([string]$Network)
+
+  $parts = $Network.Split('/')
+  if ($parts.Count -gt 2 -or [string]::IsNullOrWhiteSpace($parts[0]) -or $parts[0].Contains('%')) {
+    return $false
+  }
+  $address = $null
+  if (-not [Net.IPAddress]::TryParse($parts[0], [ref]$address) -or
+      $address.Equals([Net.IPAddress]::Any) -or
+      $address.Equals([Net.IPAddress]::IPv6Any)) {
+    return $false
+  }
+  if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) {
+    $octets = $parts[0].Split('.')
+    if ($octets.Count -ne 4) { return $false }
+    foreach ($octet in $octets) {
+      if ($octet -notmatch '^(0|[1-9][0-9]{0,2})$' -or [int]$octet -gt 255) { return $false }
+    }
+  } elseif (-not $parts[0].Contains(':')) {
+    return $false
+  }
+  if ($parts.Count -eq 1) { return $true }
+  $prefix = 0
+  if (-not [int]::TryParse($parts[1], [ref]$prefix)) { return $false }
+  $maxPrefix = if ($address.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+  return $prefix -ge 1 -and $prefix -le $maxPrefix
+}
+
 function Get-RuleSuffix {
   param([string]$Address)
   $sha = [Security.Cryptography.SHA256]::Create()
@@ -1729,6 +1841,7 @@ function Protect-RdpGuardAddress {
       -Action Block `
       -Enabled True `
       -Profile Any `
+      -EdgeTraversalPolicy Block `
       -Protocol $protocol `
       -LocalPort $Ports `
       -RemoteAddress $Address | Out-Null
@@ -1785,10 +1898,30 @@ try {
   if (-not $mutexAcquired) { exit 0 }
   if (-not (Test-Path -LiteralPath $configPath)) { exit 0 }
   $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json
-  $protectedPorts = if ($config.PSObject.Properties.Name -contains 'protectedPorts') {
-    @($config.protectedPorts | ForEach-Object { [int]$_ })
-  } else {
-    @([int]$config.rdpPort)
+  $protectedPorts = @(
+    if ($config.PSObject.Properties.Name -contains 'protectedPorts') {
+      $config.protectedPorts | ForEach-Object { [int]$_ } | Select-Object -Unique
+    } else {
+      [int]$config.rdpPort
+    }
+  )
+  if ($protectedPorts.Count -eq 0 -or ($protectedPorts | Where-Object { $_ -lt 1 -or $_ -gt 65535 })) {
+    throw 'RDP Guard 受保护端口配置无效。'
+  }
+  $trustedAddresses = @(
+    if ($config.PSObject.Properties.Name -contains 'trustedAddresses') {
+      $config.trustedAddresses | ForEach-Object { [string]$_ }
+    }
+  )
+  foreach ($trustedAddress in $trustedAddresses) {
+    if (-not (Test-TrustedNetworkDefinition -Network $trustedAddress)) {
+      throw "RDP Guard 白名单配置无效：$trustedAddress"
+    }
+  }
+  if ([int]$config.rdpPort -lt 1 -or [int]$config.rdpPort -gt 65535 -or
+      [int]$config.threshold -lt 3 -or [int]$config.threshold -gt 20 -or
+      [int]$config.windowMinutes -lt 1 -or [int]$config.windowMinutes -gt 60) {
+    throw 'RDP Guard 基础配置无效。'
   }
   $now = Get-Date
   $bans = @{}
@@ -1814,31 +1947,59 @@ try {
       $saved = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
       if ($saved.PSObject.Properties.Name -contains 'bans' -and $saved.bans) {
         foreach ($property in $saved.bans.PSObject.Properties) {
+          $parsedStateAddress = $null
+          if (-not [Net.IPAddress]::TryParse($property.Name, [ref]$parsedStateAddress) -or
+              $parsedStateAddress.Equals([Net.IPAddress]::Any) -or
+              $parsedStateAddress.Equals([Net.IPAddress]::IPv6Any)) {
+            Write-GuardLog "跳过无效的封禁地址：$($property.Name)"
+            continue
+          }
+          $stateAddress = $parsedStateAddress.ToString()
           # v1.3.x stored an expiry string directly. Keep it readable and
           # upgrade it on the next state write.
           if ($property.Value -is [string]) {
-            $bans[$property.Name] = @{ permanent = $false; expiresAt = [string]$property.Value; offenseCount = 1 }
+            $bans[$stateAddress] = @{ permanent = $false; expiresAt = [string]$property.Value; offenseCount = 1 }
             continue
           }
           $record = $property.Value
           $permanent = $record.PSObject.Properties.Name -contains 'permanent' -and [bool]$record.permanent
           $expiresAt = if ($record.PSObject.Properties.Name -contains 'expiresAt') { [string]$record.expiresAt } else { '' }
           $offenseCount = if ($record.PSObject.Properties.Name -contains 'offenseCount') { [int]$record.offenseCount } else { 1 }
-          $bans[$property.Name] = @{ permanent = $permanent; expiresAt = $expiresAt; offenseCount = $offenseCount }
+          $bans[$stateAddress] = @{ permanent = $permanent; expiresAt = $expiresAt; offenseCount = $offenseCount }
         }
       }
       if ($saved.PSObject.Properties.Name -contains 'offenses' -and $saved.offenses) {
         foreach ($property in $saved.offenses.PSObject.Properties) {
+          $parsedStateAddress = $null
+          if (-not [Net.IPAddress]::TryParse($property.Name, [ref]$parsedStateAddress) -or
+              $parsedStateAddress.Equals([Net.IPAddress]::Any) -or
+              $parsedStateAddress.Equals([Net.IPAddress]::IPv6Any)) {
+            Write-GuardLog "跳过无效的阶梯封禁地址：$($property.Name)"
+            continue
+          }
+          $stateAddress = $parsedStateAddress.ToString()
           $record = $property.Value
           if ($record.PSObject.Properties.Name -contains 'count' -and
             $record.PSObject.Properties.Name -contains 'lastBanAt') {
-            $offenses[$property.Name] = @{ count = [int]$record.count; lastBanAt = [string]$record.lastBanAt }
+            $offenses[$stateAddress] = @{ count = [int]$record.count; lastBanAt = [string]$record.lastBanAt }
           }
         }
       }
     } catch {
       Write-GuardLog "忽略损坏的状态文件：$($_.Exception.Message)"
     }
+  }
+
+  # A newly trusted source must not remain blocked by an older explicit block
+  # rule. Windows Firewall gives block rules precedence over allow rules.
+  foreach ($address in @(@($bans.Keys) + @($offenses.Keys) | Select-Object -Unique)) {
+    if (-not (Test-TrustedAddress -Address $address -TrustedAddresses $trustedAddresses)) { continue }
+    $suffix = Get-RuleSuffix -Address $address
+    Get-NetFirewallRule -Name "VpsSecurity-RdpBlock-$suffix-*" -ErrorAction SilentlyContinue |
+      Remove-NetFirewallRule -ErrorAction SilentlyContinue
+    $bans.Remove($address)
+    $offenses.Remove($address)
+    Write-GuardLog "来源已加入白名单，自动清除封禁和阶梯计数：$address"
   }
 
   foreach ($address in @($offenses.Keys)) {
@@ -1907,7 +2068,7 @@ try {
     $parsedAddress = $null
     if (-not [Net.IPAddress]::TryParse($address, [ref]$parsedAddress)) { continue }
     $address = $parsedAddress.ToString()
-    if (Test-TrustedAddress -Address $address -TrustedAddresses @($config.trustedAddresses)) { continue }
+    if (Test-TrustedAddress -Address $address -TrustedAddresses $trustedAddresses) { continue }
 
     if (-not $counts.ContainsKey($address)) { $counts[$address] = 0 }
     $counts[$address]++
@@ -2053,13 +2214,19 @@ function Set-RdpFirewallRule {
   [CmdletBinding(SupportsShouldProcess)]
   param(
     [Parameter(Mandatory)][int]$Port,
-    [Parameter(Mandatory)][int]$CurrentPort,
+    [Parameter(Mandatory)][int[]]$CurrentPort,
     [Parameter(Mandatory)][AllowEmptyCollection()][string[]]$RemoteAddresses
   )
 
   if (-not $PSCmdlet.ShouldProcess("RDP TCP/UDP 端口 $Port", '更新 Windows 防火墙规则')) { return }
   Write-Title '配置 Windows 防火墙'
-  Set-NetFirewallProfile -Name Domain, Private, Public -Enabled True -DefaultInboundAction Block
+  Set-NetFirewallProfile `
+    -Name Domain, Private, Public `
+    -Enabled True `
+    -DefaultInboundAction Block `
+    -LogBlocked True `
+    -LogMaxSizeKilobytes 32767
+  Assert-LocalFirewallRulesUsable -VerifyHardenedState
 
   Get-NetFirewallRule -Name 'VpsSecurity-RdpAllow-*' -ErrorAction SilentlyContinue |
     Remove-NetFirewallRule -ErrorAction SilentlyContinue
@@ -2074,26 +2241,29 @@ function Set-RdpFirewallRule {
       -Action Allow `
       -Enabled True `
       -Profile Any `
+      -EdgeTraversalPolicy Block `
       -Protocol $protocol `
       -LocalPort $Port `
       -RemoteAddress $remote | Out-Null
   }
 
-  if ($CurrentPort -ne $Port) {
+  $oldPorts = @($CurrentPort | Where-Object { $_ -ne $Port } | Select-Object -Unique)
+  foreach ($oldPort in $oldPorts) {
     foreach ($protocol in @('TCP', 'UDP')) {
       New-NetFirewallRule `
-        -Name "VpsSecurity-RdpAllow-Current-$protocol" `
-        -DisplayName "VPS Security - temporary current RDP $CurrentPort ($protocol)" `
+        -Name "VpsSecurity-RdpAllow-Current-$oldPort-$protocol" `
+        -DisplayName "VPS Security - temporary current RDP $oldPort ($protocol)" `
         -Group $script:FirewallGroup `
         -Direction Inbound `
         -Action Allow `
         -Enabled True `
         -Profile Any `
+        -EdgeTraversalPolicy Block `
         -Protocol $protocol `
-        -LocalPort $CurrentPort `
+        -LocalPort $oldPort `
         -RemoteAddress $remote | Out-Null
     }
-    Write-Info "重启前仍临时放行当前 RDP 端口：$CurrentPort"
+    Write-Info "重启前仍临时放行旧 RDP 端口：$oldPort"
   }
 
   if ($RemoteAddresses.Count -gt 0) {
@@ -2323,9 +2493,11 @@ function Remove-RdpGuardBan {
       if ($state.PSObject.Properties.Name -contains 'offenses' -and $state.offenses) {
         $state.offenses.PSObject.Properties.Remove($canonicalAddress)
       }
-      $temporary = "$($script:GuardStatePath).tmp"
+      $temporary = "$($script:GuardStatePath).$PID.$([guid]::NewGuid().ToString('N')).tmp"
       try {
-        $state | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $temporary -Encoding UTF8
+        $json = $state | ConvertTo-Json -Depth 5
+        $null = $json | ConvertFrom-Json
+        Set-Content -LiteralPath $temporary -Value $json -Encoding UTF8
         Move-Item -LiteralPath $temporary -Destination $script:GuardStatePath -Force
       } finally {
         Remove-Item -LiteralPath $temporary -Force -ErrorAction SilentlyContinue
@@ -2366,7 +2538,8 @@ function Show-SecurityStatus {
   $port = Get-CurrentRdpPort
   $nla = Get-ItemPropertyValue -Path $script:RdpRegistryPath -Name UserAuthentication -ErrorAction SilentlyContinue
   $deny = Get-ItemPropertyValue -Path $script:TerminalServerPath -Name fDenyTSConnections -ErrorAction SilentlyContinue
-  $profiles = Get-NetFirewallProfile | Select-Object Name, Enabled, DefaultInboundAction
+  $profiles = Get-NetFirewallProfile -PolicyStore ActiveStore |
+    Select-Object Name, Enabled, DefaultInboundAction, AllowInboundRules, AllowLocalFirewallRules
   $rules = Get-NetFirewallRule -Group $script:FirewallGroup -ErrorAction SilentlyContinue |
     Select-Object Name, Enabled, Direction, Action
   $guardTask = Get-ScheduledTask -TaskName $script:GuardTaskName -ErrorAction SilentlyContinue
@@ -2429,6 +2602,17 @@ function Show-SecurityStatus {
   Write-Host ''
   Write-Output '防火墙配置：'
   $profiles | Format-Table -AutoSize
+  foreach ($profile in @($profiles)) {
+    if ([string]$profile.Enabled -eq 'False' -or [string]$profile.DefaultInboundAction -eq 'Allow') {
+      Write-WarningLine "防火墙配置文件 $($profile.Name) 未处于脚本要求的启用/默认阻止入站状态。"
+    }
+    if ([string]$profile.AllowInboundRules -eq 'False') {
+      Write-WarningLine "防火墙配置文件 $($profile.Name) 禁止所有入站允许规则，RDP 放行规则不会生效。"
+    }
+    if ([string]$profile.AllowLocalFirewallRules -eq 'False') {
+      Write-WarningLine "防火墙配置文件 $($profile.Name) 禁止合并本地规则，脚本创建的 RDP 白名单不会生效。"
+    }
+  }
   Write-Output "本脚本 RDP 来源：$(if ($managedRemoteAddresses.Count) { $managedRemoteAddresses -join ', ' } else { '未找到规则' })"
   if ($firewallConflicts.Count -gt 0) {
     Write-WarningLine '发现可能绕过当前 RDP 来源白名单的其他入站放行规则：'
@@ -2448,11 +2632,22 @@ function Show-SecurityStatus {
 
 function Get-InteractiveConfiguration {
   $currentPort = Get-CurrentRdpPort
+  $currentPorts = @(@($currentPort) + @(Get-PendingRdpPort) | Select-Object -Unique)
 
   Write-Title 'Windows 11 RDP 安全向导'
   Write-Info "当前 RDP 端口：$currentPort"
+  $pendingPorts = @($currentPorts | Where-Object { $_ -ne $currentPort })
+  if ($pendingPorts.Count -gt 0) {
+    Write-WarningLine "检测到尚未重启清理的旧 RDP 端口：$($pendingPorts -join ', ')；本次会继续保护这些入口。"
+  }
   $suggestedPort = if ($currentPort -eq 3389) { Get-RandomAvailablePort } else { $currentPort }
-  $clientAddresses = @(Get-CurrentRdpClientAddress -Port $currentPort)
+  $clientAddresses = @(
+    @(
+      foreach ($activePort in $currentPorts) {
+        Get-CurrentRdpClientAddress -Port $activePort
+      }
+    ) | Select-Object -Unique
+  )
   if ($clientAddresses.Count -gt 0) {
     Write-Info "检测到当前 RDP 客户端地址：$($clientAddresses -join ', ')"
   }
@@ -2462,7 +2657,7 @@ function Get-InteractiveConfiguration {
     $portText = Read-Default -Prompt '新的 RDP 端口' -Default ([string]$suggestedPort)
     $parsedPort = 0
     if ([int]::TryParse($portText, [ref]$parsedPort) -and $parsedPort -ge 1024 -and $parsedPort -le 65535) {
-      if (Test-PortAvailable -Port $parsedPort -CurrentPort $currentPort) { break }
+      if (Test-PortAvailable -Port $parsedPort -CurrentPort $currentPorts) { break }
       Write-ColorLine -Text "端口 $parsedPort 已被其他程序监听，请换一个端口。" -Color Red
     } else {
       Write-ColorLine -Text '端口必须是 1024 到 65535 之间的整数。' -Color Red
@@ -2477,19 +2672,33 @@ function Get-InteractiveConfiguration {
     $remoteAddresses = @(ConvertTo-RemoteAddressList -InputValue @($addressText))
   }
   if ($remoteAddresses.Count -gt 0 -and $clientAddresses.Count -gt 0) {
-    $currentClientIsAllowed = $false
-    foreach ($clientAddress in $clientAddresses) {
-      foreach ($network in $remoteAddresses) {
-        if (Test-AddressInNetwork -Address $clientAddress -Network $network) {
-          $currentClientIsAllowed = $true
-          break
+    $unmatchedClientAddresses = @(
+      foreach ($clientAddress in $clientAddresses) {
+        $isAllowed = $false
+        foreach ($network in $remoteAddresses) {
+          if (Test-AddressInNetwork -Address $clientAddress -Network $network) {
+            $isAllowed = $true
+            break
+          }
         }
+        if (-not $isAllowed) { $clientAddress }
       }
-      if ($currentClientIsAllowed) { break }
-    }
-    if (-not $currentClientIsAllowed) {
-      Write-WarningLine '填写的白名单不包含当前检测到的 RDP 客户端地址。重连时可能被防火墙拒绝。'
-      if (-not (Read-YesNo -Prompt '仍然继续使用这个来源白名单吗？' -Default N)) {
+    )
+    if ($unmatchedClientAddresses.Count -gt 0) {
+      Write-WarningLine "白名单不包含当前 RDP 客户端地址：$($unmatchedClientAddresses -join ', ')。重连时可能被拒绝。"
+      if (Read-YesNo -Prompt '是否把这些当前来源作为单个地址自动加入白名单？' -Default Y) {
+        $currentSourceRules = @(
+          foreach ($clientAddress in $unmatchedClientAddresses) {
+            $parsedClientAddress = $null
+            if ([Net.IPAddress]::TryParse($clientAddress, [ref]$parsedClientAddress)) {
+              $prefix = if ($parsedClientAddress.AddressFamily -eq [Net.Sockets.AddressFamily]::InterNetwork) { 32 } else { 128 }
+              "$($parsedClientAddress.ToString())/$prefix"
+            }
+          }
+        )
+        $remoteAddresses = @(ConvertTo-RemoteAddressList -InputValue @($remoteAddresses + $currentSourceRules))
+        Write-Success "已加入当前来源：$($currentSourceRules -join ', ')"
+      } elseif (-not (Read-YesNo -Prompt '仍然继续使用原白名单吗？' -Default N)) {
         Write-TerminatingError '操作已取消；请重新运行并填写正确的固定 IP/CIDR。'
       }
     }
@@ -2529,6 +2738,7 @@ function Get-InteractiveConfiguration {
 
   return [pscustomobject]@{
     Port = $parsedPort
+    CurrentPorts = $currentPorts
     RemoteAddresses = $remoteAddresses
     UseGuard = $useGuard
     AccountLockoutMode = $accountLockoutMode
@@ -2539,12 +2749,13 @@ function Get-InteractiveConfiguration {
 function Invoke-Apply {
   Assert-SupportedWindows
   $currentPort = Get-CurrentRdpPort
+  $currentPorts = @(@($currentPort) + @(Get-PendingRdpPort) | Select-Object -Unique)
 
   if ($NonInteractive) {
     if (-not $script:RdpPortWasProvided) {
       Write-TerminatingError '非交互模式必须显式提供 -RdpPort。'
     }
-    if (-not (Test-PortAvailable -Port $RdpPort -CurrentPort $currentPort)) {
+    if (-not (Test-PortAvailable -Port $RdpPort -CurrentPort $currentPorts)) {
       Write-TerminatingError "端口 $RdpPort 已被其他程序监听。"
     }
     $remoteAddresses = @(ConvertTo-RemoteAddressList -InputValue $AllowedRemoteAddress)
@@ -2567,6 +2778,7 @@ function Invoke-Apply {
     $targetPort = $RdpPort
   } else {
     $configuration = Get-InteractiveConfiguration
+    $currentPorts = @($configuration.CurrentPorts)
     $remoteAddresses = @($configuration.RemoteAddresses)
     $useGuard = $configuration.UseGuard
     $accountLockoutMode = $configuration.AccountLockoutMode
@@ -2575,6 +2787,10 @@ function Invoke-Apply {
 
     Write-Title '执行摘要'
     Write-Output "RDP 端口：$currentPort -> $targetPort"
+    $pendingPorts = @($currentPorts | Where-Object { $_ -ne $currentPort })
+    if ($pendingPorts.Count -gt 0) {
+      Write-Output "重启前继续保护的旧 RDP 端口：$($pendingPorts -join ', ')"
+    }
     Write-Output "允许来源：$(if ($remoteAddresses.Count) { $remoteAddresses -join ', ' } else { 'Any' })"
     Write-Output "NLA/TLS/高加密：启用"
     Write-Output "Windows 防火墙：全部配置文件启用，默认阻止入站"
@@ -2598,7 +2814,8 @@ function Invoke-Apply {
   if ($accountLockoutMode -eq 'Availability' -and $remoteAddresses.Count -eq 0 -and -not $useGuard) {
     Write-WarningLine '公网 Any 且未启用 RDP Guard，却选择了账户不锁定；请确保这是你的明确决定。'
   }
-  Assert-NoRdpFirewallConflict -Port $targetPort -RemoteAddresses $remoteAddresses
+  Assert-LocalFirewallRulesUsable
+  Assert-NoRdpFirewallConflict -Port @($currentPorts + $targetPort) -RemoteAddresses $remoteAddresses
   $telegram = Confirm-TelegramConfiguration -Telegram $telegram
   $backupPath = Save-SecurityBackup
   try {
@@ -2608,8 +2825,8 @@ function Invoke-Apply {
       Remove-TelegramNotification
       Write-Info 'Telegram 通知未启用。'
     }
-    Set-RdpFirewallRule -Port $targetPort -CurrentPort $currentPort -RemoteAddresses $remoteAddresses
-    Install-RdpPortCleanup -CurrentPort $currentPort -TargetPort $targetPort
+    Set-RdpFirewallRule -Port $targetPort -CurrentPort $currentPorts -RemoteAddresses $remoteAddresses
+    Install-RdpPortCleanup -CurrentPort $currentPorts -TargetPort $targetPort
     Set-RdpSecuritySetting -Port $targetPort
     if ($accountLockoutMode -ne 'KeepExisting') {
       Set-AccountLockoutPolicy -Mode $accountLockoutMode
@@ -2617,7 +2834,7 @@ function Invoke-Apply {
     if ($useGuard) {
       Install-RdpGuard `
         -Port $targetPort `
-        -ProtectedPorts @($currentPort, $targetPort) `
+        -ProtectedPorts @($currentPorts + $targetPort) `
         -TrustedAddresses $remoteAddresses `
         -Threshold $BanThreshold `
         -WindowMinutes $BanWindowMinutes `
