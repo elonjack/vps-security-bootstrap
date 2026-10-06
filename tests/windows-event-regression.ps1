@@ -107,9 +107,13 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     if ($MaxEvents -gt 0) { $events = @($events | Select-Object -First $MaxEvents) }
     return $events
   }
+  $global:ciFirewallRuleDefinition = ''
   function global:Get-ItemPropertyValue {
     [CmdletBinding()]
-    param([string]$Path, [string]$Name)
+    param([Alias('LiteralPath')][string]$Path, [string]$Name)
+    if ($Path -like '*\FirewallPolicy\FirewallRules') {
+      return $global:ciFirewallRuleDefinition
+    }
     return 44756
   }
   & $watcherPath
@@ -339,7 +343,20 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     throw 'Firewall local-port conflict matching failed.'
   }
 
+  $packageDefinition = 'v2.33|Action=Allow|PFN=Microsoft.Windows.Test_cw5n1h2txyewy|LUOwn=S-1-5-18|'
+  if ((Get-FirewallPackageIdentityFromDefinition -Definition $packageDefinition) -ne
+      'Microsoft.Windows.Test_cw5n1h2txyewy' -or
+      (Get-FirewallPackageIdentityFromDefinition -Definition 'v2.33|AppPkgId=S-1-15-2-12345|') -ne
+      'S-1-15-2-12345' -or
+      $null -ne (Get-FirewallPackageIdentityFromDefinition -Definition 'v2.33|PFN=Any|') -or
+      $null -ne (Get-FirewallPackageIdentityFromDefinition -Definition 'v2.33|Action=Allow|')) {
+    throw 'Firewall package-identity parsing failed.'
+  }
+
   $global:ciFirewallRemoteAddress = 'Any'
+  $global:ciFirewallRuleDefinition = ''
+  $global:ciFirewallPolicyStoreSourceType = 'Local'
+  $global:ciFirewallPackage = ''
   function global:Get-NetFirewallRule {
     [CmdletBinding()]
     param(
@@ -353,7 +370,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
       Name = 'Legacy-Rdp-Allow'
       DisplayName = 'Legacy RDP Allow Any'
       Group = 'Legacy'
-      PolicyStoreSourceType = 'Local'
+      PolicyStoreSourceType = $global:ciFirewallPolicyStoreSourceType
     }
   }
   function global:Get-NetFirewallPortFilter {
@@ -369,7 +386,12 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   function global:Get-NetFirewallApplicationFilter {
     [CmdletBinding()]
     param([Parameter(ValueFromPipeline)]$InputObject)
-    process { return [pscustomobject]@{ Program = 'Any' } }
+    process {
+      return [pscustomobject]@{
+        Program = 'Any'
+        Package = $global:ciFirewallPackage
+      }
+    }
   }
   function global:Get-NetFirewallServiceFilter {
     [CmdletBinding()]
@@ -384,6 +406,33 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 1) {
     throw 'An unmanaged allow rule for a different source was not reported as a whitelist conflict.'
   }
+  $global:ciFirewallRuleDefinition = $packageDefinition
+  $packageRuleConflicts = @(Get-RdpFirewallConflict -Port 44756)
+  if ($packageRuleConflicts.Count -ne 0) {
+    $packageConstraint = Test-FirewallRuleHasPackageConstraint `
+      -Rule ([pscustomobject]@{
+        Name = 'Legacy-Rdp-Allow'
+        PolicyStoreSourceType = $global:ciFirewallPolicyStoreSourceType
+      }) `
+      -ApplicationFilters @([pscustomobject]@{ Program = 'Any'; Package = $global:ciFirewallPackage })
+    throw "A local AppContainer PFN rule was incorrectly reported as an RDP whitelist conflict. Constraint=$packageConstraint Definition=$global:ciFirewallRuleDefinition"
+  }
+  $global:ciFirewallRuleDefinition = 'v2.33|Action=Allow|PFN=Any|'
+  if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 1) {
+    throw 'An unrestricted PFN value was incorrectly treated as a package constraint.'
+  }
+  $global:ciFirewallRuleDefinition = $packageDefinition
+  $global:ciFirewallPolicyStoreSourceType = 'GroupPolicy'
+  if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 1) {
+    throw 'A GPO rule was incorrectly matched to a local registry PFN definition.'
+  }
+  $global:ciFirewallPackage = 'S-1-15-2-12345'
+  if (@(Get-RdpFirewallConflict -Port 44756).Count -ne 0) {
+    throw 'A package-scoped firewall rule was incorrectly reported as an RDP whitelist conflict.'
+  }
+  $global:ciFirewallRuleDefinition = ''
+  $global:ciFirewallPolicyStoreSourceType = 'Local'
+  $global:ciFirewallPackage = ''
   $multiPortConflictCaught = $false
   try {
     $null = Assert-NoRdpFirewallConflict `
@@ -443,7 +492,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   }
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Variable `
-    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls,ciRemoveFirewallRuleCalls,ciFirewallRuleExists `
+    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciFirewallRuleDefinition,ciFirewallPolicyStoreSourceType,ciFirewallPackage,ciNewFirewallRuleCalls,ciRemoveFirewallRuleCalls,ciFirewallRuleExists `
     -Scope Global `
     -ErrorAction SilentlyContinue
 }

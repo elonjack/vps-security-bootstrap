@@ -146,7 +146,7 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | 项目 | 作用 |
 | --- | --- |
 | RDP 端口 | 可改为 1024–65535 的未占用端口。重启前旧端口临时放行，重启后自动移除旧规则；若尚未重启就再次运行脚本，会识别并继续保护所有待清理旧端口，不会误删当前仍在使用的入口。 |
-| 来源白名单 | 固定公网 IP/CIDR 可限制 RDP 来源；经常换网络或使用动态 IP 时可选 `Any`，由 NLA、不可复用的强密码和 RDP Guard 共同防护。脚本拒绝等同于全网放行的 `0.0.0.0/0`、`::/0` 和未指定地址；会逐个核对当前 RDP 客户端，默认可将遗漏的当前来源按 `/32` 或 `/128` 加入。选择白名单时，会同时检查当前端口与新端口上可能绕过白名单的既有放行规则，发现冲突则在修改系统前停止并列出规则。 |
+| 来源白名单 | 固定公网 IP/CIDR 可限制 RDP 来源；经常换网络或使用动态 IP 时可选 `Any`，由 NLA、不可复用的强密码和 RDP Guard 共同防护。脚本拒绝等同于全网放行的 `0.0.0.0/0`、`::/0` 和未指定地址；会逐个核对当前 RDP 客户端，默认可将遗漏的当前来源按 `/32` 或 `/128` 加入。选择白名单时，会同时检查当前端口与新端口上可能绕过白名单的既有放行规则，发现冲突则在修改系统前停止并列出规则。Windows 11 生成的 AppContainer `ServerCapability` 规则只有在底层本机策略存在非空 `PFN`/`AppPkgId` 包身份约束时才会被安全排除；读取失败、`Any`、组策略或 MDM 中未明确显示包约束的规则仍按冲突处理。 |
 | NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。NLA 会在建立完整桌面会话前验证凭据，减少未认证会话消耗和暴露面，但不会阻止密码猜测，也不会避免 Windows 按用户名累计失败次数。 |
 | Windows 防火墙 | 启用全部配置文件、默认拒绝入站、记录被阻止的连接，并只允许配置的 RDP TCP/UDP 端口和来源；显式禁止边缘穿越。应用前会检查组策略/MDM 是否禁止本地规则或所有入站允许规则，避免生成实际上不生效的白名单。 |
 | RDP Guard | 可选。默认同一来源在 5 分钟内发生 3 次 RDP 登录失败时，90 天累计窗口内第 1/2/3/4 次分别封禁 1/3/7/30 天，第 5 次永久封禁；90 天未再触发会重置计数。累计窗口特意长于最长的 30 天临时封禁，确保永久封禁确实可达。除标准 RemoteInteractive（类型 10）外，也识别 Windows 11 NLA 可能产生的 `类型 3 + NtLmSsp + NTLM/Negotiate + 来源端口 0` 前置认证失败；带真实来源端口的普通 SMB 等网络登录失败仍会忽略。事件突发时不会排队启动大量 PowerShell 实例，并每分钟兜底补扫；已有封禁规则若被意外删除会自动补回。若一个已封禁地址后来被加入来源白名单，Guard 会移除其显式阻止规则和阶梯计数，避免“允许规则仍被旧阻止规则覆盖”。 |
@@ -169,12 +169,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳-随机�
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.4.8`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.9`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.4.8
+version=v1.4.9
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -185,7 +185,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.4.8'
+$version = 'v1.4.9'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256
