@@ -461,7 +461,7 @@ jobs:
             'Protect-RdpGuardAddress',
             '-Repair',
             '-EdgeTraversalPolicy Block',
-            '来源已加入白名单，自动清除封禁和阶梯计数'
+            'Test-TrustedNetworkDefinition'
           )) {
             if ($guardSource -notmatch [regex]::Escape($requiredGuardFeature)) {
               throw "RDP Guard escalation feature is missing: $requiredGuardFeature"
