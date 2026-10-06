@@ -164,7 +164,8 @@ jobs:
           }
           if (@($interactiveConfiguration).Count -ne 1 -or
             $null -eq $interactiveConfiguration -or
-            $null -eq $interactiveConfiguration.PSObject.Properties['RemoteAddresses']) {
+            $null -eq $interactiveConfiguration.PSObject.Properties['RemoteAddresses'] -or
+            $interactiveConfiguration.AccountLockoutMode -ne 'Availability') {
             throw 'Interactive configuration must return only its configuration object.'
           }
           $listeningPorts = @(Get-ListeningLocalPort)
@@ -435,6 +436,17 @@ jobs:
               $guardPolicy.PermanentAfter -ne 5 -or
               ($guardPolicy.BanDurationsMinutes -join ',') -ne '1440,4320,10080,43200') {
             throw 'RDP Guard must use the documented reachable 90-day escalating ban policy.'
+          }
+          $accountPolicyDefinition = (Get-Command Set-AccountLockoutPolicy).ScriptBlock.ToString()
+          foreach ($requiredAccountPolicyFeature in @(
+            "/lockoutthreshold:0",
+            "/lockoutthreshold:10",
+            "/lockoutduration:15",
+            "/lockoutwindow:15"
+          )) {
+            if ($accountPolicyDefinition -notmatch [regex]::Escape($requiredAccountPolicyFeature)) {
+              throw "Account lockout mode is missing: $requiredAccountPolicyFeature"
+            }
           }
           foreach ($requiredGuardFeature in @(
             'offenses',

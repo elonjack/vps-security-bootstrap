@@ -346,6 +346,22 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
       $bootstrapDefinition -notmatch 'OffenseWindowDays = 90') {
     throw 'RDP Guard must use three failures, a one-minute catch-up sweep, and a reachable permanent-ban window.'
   }
+  if ($bootstrapDefinition -notmatch '\[ValidateSet\(''Auto'', ''Availability'', ''Baseline''\)\]' -or
+      $bootstrapDefinition -notmatch "accountLockoutMode = 'KeepExisting'" -or
+      $bootstrapDefinition -notmatch 'remoteAddresses\.Count -eq 0 -and \$useGuard') {
+    throw 'Scenario-aware account lockout selection or SkipAccountPolicy compatibility is missing.'
+  }
+  $accountPolicyDefinition = (Get-Command Set-AccountLockoutPolicy).ScriptBlock.ToString()
+  foreach ($requiredAccountPolicyFeature in @(
+    "/lockoutthreshold:0",
+    "/lockoutthreshold:10",
+    "/lockoutduration:15",
+    "/lockoutwindow:15"
+  )) {
+    if ($accountPolicyDefinition -notmatch [regex]::Escape($requiredAccountPolicyFeature)) {
+      throw "Account lockout mode is missing: $requiredAccountPolicyFeature"
+    }
+  }
   $watcherSource = Get-TelegramLoginWatcherSource
   if ($watcherSource -notmatch 'EventRecordID > \$lastRecordId' -or
       $watcherSource -notmatch '-Oldest' -or
