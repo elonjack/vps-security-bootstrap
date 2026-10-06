@@ -146,14 +146,16 @@ bash <(curl -fsSL https://github.com/elonjack/vps-security-bootstrap/releases/la
 | 项目 | 作用 |
 | --- | --- |
 | RDP 端口 | 可改为 1024–65535 的未占用端口。重启前旧端口临时放行，重启后自动移除旧规则。 |
-| 来源白名单 | 固定公网 IP/CIDR 可限制 RDP 来源；经常换网络或使用动态 IP 时选 `Any`，由 NLA、强密码、RDP Guard 和账户锁定共同防护。选择白名单时，脚本会先检查可能绕过它的既有 RDP 放行规则，发现冲突则在修改系统前停止并列出规则。 |
-| NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。 |
+| 来源白名单 | 固定公网 IP/CIDR 可限制 RDP 来源；经常换网络或使用动态 IP 时可选 `Any`，由 NLA、不可复用的强密码和 RDP Guard 共同防护。选择白名单时，脚本会先检查可能绕过它的既有 RDP 放行规则，发现冲突则在修改系统前停止并列出规则。 |
+| NLA / TLS / 高加密 | 强制网络级身份验证、TLS 安全层和高加密，同时关闭远程协助。NLA 会在建立完整桌面会话前验证凭据，减少未认证会话消耗和暴露面，但不会阻止密码猜测，也不会避免 Windows 按用户名累计失败次数。 |
 | Windows 防火墙 | 启用全部配置文件并默认拒绝入站，只允许配置的 RDP TCP/UDP 端口和来源。 |
 | RDP Guard | 可选。默认同一来源在 5 分钟内发生 3 次 RDP 登录失败时，90 天累计窗口内第 1/2/3/4 次分别封禁 1/3/7/30 天，第 5 次永久封禁；90 天未再触发会重置计数。累计窗口特意长于最长的30天临时封禁，确保永久封禁确实可达。除标准 RemoteInteractive（类型 10）外，也识别 Windows 11 NLA 可能产生的 `类型 3 + NtLmSsp + NTLM/Negotiate + 来源端口 0` 前置认证失败；带真实来源端口的普通 SMB 等网络登录失败仍会忽略。事件突发时不会排队启动大量 PowerShell 实例，并每分钟兜底补扫；已有封禁规则若被意外删除会自动补回。 |
-| 账户锁定策略 | 可选。默认连续失败 10 次锁定 15 分钟。 |
+| 账户锁定策略 | 提供三种选择。公网 `Any` 且启用 RDP Guard 时默认推荐“公网可用性模式”，将锁定阈值设为 `0`，避免攻击者通过反复输入错误密码锁住真正的管理员；固定来源或未启用 Guard 时默认推荐“Windows 基线模式”，连续失败 10 次锁定 15 分钟；也可保持现有策略不变。关闭锁定不会关闭密码验证，必须配合不可复用的强密码、NLA 和 RDP Guard。 |
 | Telegram | 可选；应用系统修改前会先验证 Bot Token 并发送测试消息验证 Chat ID。登录、封禁和解封消息采用带图标的分层格式。RDP 登录通知包含用户、来源 IP、端口和**安全日志的实际登录时间**；若发送延迟超过一分钟，会额外标明通知发送时间。登录事件按批次读取，不会因待处理事件超过 100 条而漏掉较早记录；安全日志被清空或轮转后会自动重置游标。失败时会显示具体原因，可重新输入或跳过 Telegram 继续配置 RDP；Token 文件仅允许 `Administrators` 和 `SYSTEM` 访问。 |
 
-`Any` 是明确支持的通用配置，并不要求你固定 IP。它适合 2C2G20G 小 VPS、4C6G100G VPS 和独立服务器，只是公网 RDP 风险高于来源白名单；务必使用不复用的强密码，并建议保留 RDP Guard 与账户锁定。脚本不会根据磁盘大小自动禁用更新，是否禁用完全由菜单 `4` 决定。
+`Any` 是明确支持的通用配置，并不要求你固定 IP。它适合 2C2G20G 小 VPS、4C6G100G VPS 和独立服务器，只是公网 RDP 风险高于来源白名单；务必使用至少 20 位、随机且不复用的密码，并保留 RDP Guard。公网可用性模式解决的是“攻击者恶意锁号”问题，不代表公网 RDP 与来源白名单或 VPN 同样安全。脚本不会根据磁盘大小自动禁用更新，是否禁用完全由菜单 `4` 决定。
+
+非交互运行时，`-AccountLockoutMode Auto`（默认）会采用同样的场景判断；也可以显式指定 `Availability` 或 `Baseline`。旧参数 `-SkipAccountPolicy` 仍受支持，含义是保持现有账户策略不变，不能与显式模式同时使用。
 
 选择 `4` 后的子菜单：
 
@@ -167,12 +169,12 @@ Windows 备份在 `C:\ProgramData\VpsSecurityBootstrap\backups\时间戳\`；需
 
 ## 固定版本与完整性校验
 
-当前版本为 `v1.4.6`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
+当前版本为 `v1.4.7`。安装器只会运行与其内置 SHA-256 匹配的主脚本。Windows 的快速命令会先将 UTF-8 BOM 脚本保存为文件，再由 Windows PowerShell 5.1 执行；从 32 位 PowerShell 启动时，安装器会自动改用 64 位 Windows PowerShell。不要用 `Invoke-Expression` 直接执行该安装器。哈希校验不能替代独立的发布签名或对 Release 的人工审阅。
 
 ### Debian
 
 ```bash
-version=v1.4.6
+version=v1.4.7
 base="https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 curl -fSLO "$base/install.sh"
 curl -fSLO "$base/install.sh.sha256"
@@ -183,7 +185,7 @@ bash install.sh
 ### Windows
 
 ```powershell
-$version = 'v1.4.6'
+$version = 'v1.4.7'
 $base = "https://github.com/elonjack/vps-security-bootstrap/releases/download/$version"
 Invoke-WebRequest "$base/install.ps1" -OutFile install.ps1
 Invoke-WebRequest "$base/install.ps1.sha256" -OutFile install.ps1.sha256

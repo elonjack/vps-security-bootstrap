@@ -7,7 +7,7 @@
 .DESCRIPTION
   Changes the RDP port, requires Network Level Authentication, enables Windows
   Firewall, optionally restricts RDP to trusted IP/CIDR ranges, configures a
-  temporary account lockout policy, an event-driven RDP guard, and optional
+  scenario-aware account lockout policy, an event-driven RDP guard, and optional
   Telegram notifications for successful RDP logons, bans, and unbans.
 
   Run this script from an elevated Windows PowerShell 5.1 console. Registry,
@@ -22,6 +22,11 @@
 
 .PARAMETER TelegramTokenFile
   A tightly ACL-restricted file whose first line contains the Bot Token.
+
+.PARAMETER AccountLockoutMode
+  Auto selects availability mode for public Any-source RDP with RDP Guard, and
+  the Windows baseline otherwise. Availability prevents username-wide lockout;
+  Baseline locks an account for 15 minutes after 10 failures.
 
 .PARAMETER NonInteractive
   Disables prompts. Apply also requires an explicit RdpPort.
@@ -61,6 +66,9 @@ param(
   [ValidateRange(1, 10080)]
   [int]$BanMinutes = 1440,
 
+  [ValidateSet('Auto', 'Availability', 'Baseline')]
+  [string]$AccountLockoutMode = 'Auto',
+
   [switch]$SkipRdpGuard,
   [switch]$SkipAccountPolicy,
   [switch]$DisableTelegram,
@@ -72,7 +80,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.6'
+$script:ScriptVersion = 'v1.4.7'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -2113,16 +2121,27 @@ function Set-RdpSecuritySetting {
   Write-Success '已要求 NLA、TLS 安全层和高加密，并关闭远程协助'
 }
 
-function Set-TemporaryAccountLockoutPolicy {
+function Set-AccountLockoutPolicy {
   [CmdletBinding(SupportsShouldProcess)]
-  param()
+  param(
+    [Parameter(Mandatory)]
+    [ValidateSet('Availability', 'Baseline')]
+    [string]$Mode
+  )
 
-  if (-not $PSCmdlet.ShouldProcess('本地账户策略', '设置临时账户锁定策略')) { return }
-  Write-Title '配置本地账户临时锁定策略'
+  if (-not $PSCmdlet.ShouldProcess('本地账户策略', "应用 $Mode 账户锁定模式")) { return }
+  Write-Title '配置本地账户锁定策略'
+  if ($Mode -eq 'Availability') {
+    Invoke-NativeCommand -FilePath 'net.exe' -ArgumentList @('accounts', '/lockoutthreshold:0') | Out-Null
+    Write-Success '公网可用性模式：账户不会因远程错误密码而被恶意锁定'
+    Write-WarningLine '此模式依赖 NLA、不可复用的强密码和 RDP Guard；NLA 本身不能阻止密码爆破。'
+    return
+  }
+
   Invoke-NativeCommand -FilePath 'net.exe' -ArgumentList @('accounts', '/lockoutthreshold:10') | Out-Null
   Invoke-NativeCommand -FilePath 'net.exe' -ArgumentList @('accounts', '/lockoutduration:15') | Out-Null
   Invoke-NativeCommand -FilePath 'net.exe' -ArgumentList @('accounts', '/lockoutwindow:15') | Out-Null
-  Write-Success '连续失败 10 次后锁定 15 分钟，并在 15 分钟后重置失败计数'
+  Write-Success 'Windows 基线模式：连续失败 10 次后锁定 15 分钟，并在 15 分钟后重置失败计数'
 }
 
 function Get-WindowsUpdateStatus {
@@ -2482,14 +2501,37 @@ function Get-InteractiveConfiguration {
   } else {
     $useGuard = Read-YesNo -Prompt '启用 RDP Guard 自动封禁爆破来源吗？' -Default Y
   }
-  $setAccountPolicy = Read-YesNo -Prompt '采用“失败 10 次、锁定 15 分钟”的账户策略吗？' -Default Y
+
+  Write-Host ''
+  Write-Info '账户锁定按用户名累计，不区分攻击来源；NLA 也不会阻止攻击者故意锁号。'
+  Write-Host '  1. 公网可用性模式：不锁定账户，依靠强密码、NLA 和 RDP Guard'
+  Write-Host '  2. Windows 基线模式：失败 10 次锁定 15 分钟，可能被恶意锁号'
+  Write-Host '  3. 保持现有账户策略不变'
+  $defaultAccountChoice = if ($remoteAddresses.Count -eq 0 -and $useGuard) { '1' } else { '2' }
+  while ($true) {
+    $accountChoice = Read-Default -Prompt '请选择账户锁定模式' -Default $defaultAccountChoice
+    $accountLockoutMode = switch ($accountChoice) {
+      '1' { 'Availability' }
+      '2' { 'Baseline' }
+      '3' { 'KeepExisting' }
+      default { $null }
+    }
+    if ($accountLockoutMode) { break }
+    Write-ColorLine -Text '请输入 1、2 或 3。' -Color Red
+  }
+  if ($accountLockoutMode -eq 'Availability' -and $remoteAddresses.Count -eq 0 -and -not $useGuard) {
+    Write-WarningLine '当前同时选择了公网 Any、不启用 RDP Guard、账户不锁定；不建议这样配置。'
+    if (-not (Read-YesNo -Prompt '仍然继续使用这个组合吗？' -Default N)) {
+      Write-TerminatingError '操作已取消；请重新运行并启用 RDP Guard，或选择 Windows 基线模式。'
+    }
+  }
   $telegram = Get-DesiredTelegramConfiguration
 
   return [pscustomobject]@{
     Port = $parsedPort
     RemoteAddresses = $remoteAddresses
     UseGuard = $useGuard
-    SetAccountPolicy = $setAccountPolicy
+    AccountLockoutMode = $accountLockoutMode
     Telegram = $telegram
   }
 }
@@ -2507,14 +2549,27 @@ function Invoke-Apply {
     }
     $remoteAddresses = @(ConvertTo-RemoteAddressList -InputValue $AllowedRemoteAddress)
     $useGuard = -not $SkipRdpGuard
-    $setAccountPolicy = -not $SkipAccountPolicy
+    if ($SkipAccountPolicy -and $AccountLockoutMode -ne 'Auto') {
+      Write-TerminatingError '-SkipAccountPolicy 不能与显式 -AccountLockoutMode 同时使用。'
+    }
+    if ($SkipAccountPolicy) {
+      $accountLockoutMode = 'KeepExisting'
+    } elseif ($AccountLockoutMode -eq 'Auto') {
+      $accountLockoutMode = if ($remoteAddresses.Count -eq 0 -and $useGuard) {
+        'Availability'
+      } else {
+        'Baseline'
+      }
+    } else {
+      $accountLockoutMode = $AccountLockoutMode
+    }
     $telegram = Get-DesiredTelegramConfiguration
     $targetPort = $RdpPort
   } else {
     $configuration = Get-InteractiveConfiguration
     $remoteAddresses = @($configuration.RemoteAddresses)
     $useGuard = $configuration.UseGuard
-    $setAccountPolicy = $configuration.SetAccountPolicy
+    $accountLockoutMode = $configuration.AccountLockoutMode
     $telegram = $configuration.Telegram
     $targetPort = $configuration.Port
 
@@ -2525,7 +2580,12 @@ function Invoke-Apply {
     Write-Output "Windows 防火墙：全部配置文件启用，默认阻止入站"
     $guardPolicy = Get-RdpGuardEscalationPolicy -InitialBanMinutes $BanMinutes
     Write-Output "RDP Guard：$(if ($useGuard) { "$BanWindowMinutes 分钟失败 $BanThreshold 次；$(Get-RdpGuardEscalationSummary -Policy $guardPolicy)" } else { '不启用' })"
-    Write-Output "账户锁定策略：$(if ($setAccountPolicy) { '10 次 / 15 分钟' } else { '保持现状' })"
+    $accountLockoutSummary = switch ($accountLockoutMode) {
+      'Availability' { '公网可用性模式（不锁定账户）' }
+      'Baseline' { 'Windows 基线模式（10 次 / 15 分钟）' }
+      default { '保持现状' }
+    }
+    Write-Output "账户锁定策略：$accountLockoutSummary"
     Write-Output "Telegram：$(if ($telegram.Enabled) { '登录、封禁、解封通知已选择' } else { '不启用' })"
     Write-Output '自动重启：否'
 
@@ -2535,6 +2595,9 @@ function Invoke-Apply {
     }
   }
 
+  if ($accountLockoutMode -eq 'Availability' -and $remoteAddresses.Count -eq 0 -and -not $useGuard) {
+    Write-WarningLine '公网 Any 且未启用 RDP Guard，却选择了账户不锁定；请确保这是你的明确决定。'
+  }
   Assert-NoRdpFirewallConflict -Port $targetPort -RemoteAddresses $remoteAddresses
   $telegram = Confirm-TelegramConfiguration -Telegram $telegram
   $backupPath = Save-SecurityBackup
@@ -2548,7 +2611,9 @@ function Invoke-Apply {
     Set-RdpFirewallRule -Port $targetPort -CurrentPort $currentPort -RemoteAddresses $remoteAddresses
     Install-RdpPortCleanup -CurrentPort $currentPort -TargetPort $targetPort
     Set-RdpSecuritySetting -Port $targetPort
-    if ($setAccountPolicy) { Set-TemporaryAccountLockoutPolicy }
+    if ($accountLockoutMode -ne 'KeepExisting') {
+      Set-AccountLockoutPolicy -Mode $accountLockoutMode
+    }
     if ($useGuard) {
       Install-RdpGuard `
         -Port $targetPort `
@@ -2571,7 +2636,10 @@ function Invoke-Apply {
   Write-WarningLine "先在云厂商安全组放行 TCP/UDP $targetPort，再重启 Windows。"
   Write-WarningLine "重启后使用 mstsc 连接：服务器IP:$targetPort；成功前不要关闭当前 RDP/控制台会话。"
   if ($remoteAddresses.Count -eq 0) {
-    Write-WarningLine '未设置固定来源白名单；改端口只能减少扫描噪声，主要防线是 NLA、强密码、RDP Guard 和临时锁定。'
+    Write-WarningLine '未设置固定来源白名单；改端口只能减少扫描噪声，主要防线是 NLA、不可复用的强密码和 RDP Guard。'
+    if ($accountLockoutMode -eq 'Availability') {
+      Write-WarningLine '已关闭账户锁定以防止他人通过错误密码拒绝你的登录；这不会关闭密码验证。'
+    }
   }
   if ($telegram.Enabled) {
     Write-Success 'Telegram 将通知 RDP 登录成功、来源封禁和解除封禁'

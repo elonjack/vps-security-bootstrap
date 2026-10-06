@@ -14,6 +14,7 @@ $mockNames = @(
   'Get-NetFirewallAddressFilter',
   'Get-NetFirewallApplicationFilter',
   'Get-NetFirewallServiceFilter',
+  'Invoke-NativeCommand',
   'New-NetFirewallRule',
   'Remove-NetFirewallRule'
 )
@@ -336,6 +337,28 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
     throw 'An unmanaged allow rule for a different source was not reported as a whitelist conflict.'
   }
 
+  $global:ciNativeCommandCalls = [Collections.Generic.List[object]]::new()
+  function global:Invoke-NativeCommand {
+    param([string]$FilePath, [string[]]$ArgumentList, [switch]$IgnoreExitCode)
+    $global:ciNativeCommandCalls.Add([pscustomobject]@{
+      FilePath = $FilePath
+      ArgumentList = @($ArgumentList)
+    })
+    return 0
+  }
+  Set-AccountLockoutPolicy -Mode Availability
+  if ($global:ciNativeCommandCalls.Count -ne 1 -or
+      $global:ciNativeCommandCalls[0].FilePath -ne 'net.exe' -or
+      ($global:ciNativeCommandCalls[0].ArgumentList -join ' ') -ne 'accounts /lockoutthreshold:0') {
+    throw 'Availability mode must disable username-wide account lockout with one explicit net accounts call.'
+  }
+  $global:ciNativeCommandCalls.Clear()
+  Set-AccountLockoutPolicy -Mode Baseline
+  $baselineCalls = @($global:ciNativeCommandCalls | ForEach-Object { $_.ArgumentList -join ' ' })
+  if (($baselineCalls -join '|') -ne 'accounts /lockoutthreshold:10|accounts /lockoutduration:15|accounts /lockoutwindow:15') {
+    throw "Baseline mode did not apply the expected 10-failure/15-minute policy: $($baselineCalls -join '|')"
+  }
+
   $bootstrapDefinition = Get-Content -LiteralPath $BootstrapPath -Raw -Encoding UTF8
   if ($bootstrapDefinition -match '-MultipleInstances Queue' -or
       ([regex]::Matches($bootstrapDefinition, '-MultipleInstances IgnoreNew')).Count -lt 2) {
@@ -345,6 +368,11 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
       $bootstrapDefinition -notmatch "'/SC', 'MINUTE', '/MO', '1'" -or
       $bootstrapDefinition -notmatch 'OffenseWindowDays = 90') {
     throw 'RDP Guard must use three failures, a one-minute catch-up sweep, and a reachable permanent-ban window.'
+  }
+  if ($bootstrapDefinition -notmatch '\[ValidateSet\(''Auto'', ''Availability'', ''Baseline''\)\]' -or
+      $bootstrapDefinition -notmatch "accountLockoutMode = 'KeepExisting'" -or
+      $bootstrapDefinition -notmatch 'remoteAddresses\.Count -eq 0 -and \$useGuard') {
+    throw 'Scenario-aware account lockout selection or SkipAccountPolicy compatibility is missing.'
   }
   $watcherSource = Get-TelegramLoginWatcherSource
   if ($watcherSource -notmatch 'EventRecordID > \$lastRecordId' -or
@@ -367,7 +395,7 @@ param([string]$NotificationType,[string]$UserName,[string]$Address,[int]$Port,[d
   }
   Remove-Item -LiteralPath $testRoot -Recurse -Force -ErrorAction SilentlyContinue
   Remove-Variable `
-    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls `
+    ciTelegramBody,ciLoginEventXml,ciGuardEventXml,ciEvents,ciWinEventOldestCalls,ciFirewallRemoteAddress,ciNewFirewallRuleCalls,ciNativeCommandCalls `
     -Scope Global `
     -ErrorAction SilentlyContinue
 }
