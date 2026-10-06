@@ -419,16 +419,23 @@ jobs:
           if ((Get-RdpGuardSource) -notmatch 'protectedPorts') {
             throw 'RDP Guard must protect both the current and target ports before reboot.'
           }
-          if ((Get-RdpGuardSource) -notmatch "LogonType -ne '10'") {
-            throw 'RDP Guard must only count RemoteInteractive (RDP) failures by default.'
+          $guardSource = Get-RdpGuardSource
+          foreach ($requiredAuthenticationFeature in @(
+            'Test-RdpAuthenticationFailure',
+            "logonType -eq '10'",
+            "logonType -ne '3'",
+            "sourcePort -eq '0'"
+          )) {
+            if ($guardSource -notmatch [regex]::Escape($requiredAuthenticationFeature)) {
+              throw "RDP Guard authentication filter is missing: $requiredAuthenticationFeature"
+            }
           }
           $guardPolicy = Get-RdpGuardEscalationPolicy
-          if ($guardPolicy.OffenseWindowDays -ne 30 -or
+          if ($guardPolicy.OffenseWindowDays -ne 90 -or
               $guardPolicy.PermanentAfter -ne 5 -or
               ($guardPolicy.BanDurationsMinutes -join ',') -ne '1440,4320,10080,43200') {
-            throw 'RDP Guard must use the documented 30-day escalating ban policy.'
+            throw 'RDP Guard must use the documented reachable 90-day escalating ban policy.'
           }
-          $guardSource = Get-RdpGuardSource
           foreach ($requiredGuardFeature in @(
             'offenses',
             'offenseWindowDays',
