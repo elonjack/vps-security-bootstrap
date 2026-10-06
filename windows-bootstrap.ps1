@@ -53,7 +53,7 @@ param(
   [string]$TelegramVpsName,
 
   [ValidateRange(3, 20)]
-  [int]$BanThreshold = 5,
+  [int]$BanThreshold = 3,
 
   [ValidateRange(1, 60)]
   [int]$BanWindowMinutes = 5,
@@ -72,7 +72,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-$script:ScriptVersion = 'v1.4.5'
+$script:ScriptVersion = 'v1.4.6'
 $script:DataRoot = Join-Path $env:ProgramData 'VpsSecurityBootstrap'
 $script:BackupRoot = Join-Path $script:DataRoot 'backups'
 $script:GuardPath = Join-Path $script:DataRoot 'rdp-guard.ps1'
@@ -1598,7 +1598,10 @@ function Get-RdpGuardEscalationPolicy {
     ($InitialBanMinutes * 30)
   )
   return [pscustomobject]@{
-    OffenseWindowDays = 30
+    # This must remain longer than the longest temporary ban (30 days).
+    # Otherwise the fourth offense expires at the same moment as its ban and
+    # the documented fifth-offense permanent ban can never be reached.
+    OffenseWindowDays = 90
     BanDurationsMinutes = $durations
     PermanentAfter = 5
   }
@@ -1610,7 +1613,7 @@ function Get-RdpGuardEscalationSummary {
   $labels = @($Policy.BanDurationsMinutes | ForEach-Object {
     if ($_ % 1440 -eq 0) { "$($_ / 1440) 天" } else { "$_ 分钟" }
   })
-  return "30 天内第 1–4 次依次封禁 $($labels -join '、')；第 $($Policy.PermanentAfter) 次永久封禁"
+  return "$($Policy.OffenseWindowDays) 天内第 1–4 次依次封禁 $($labels -join '、')；第 $($Policy.PermanentAfter) 次永久封禁"
 }
 
 function Get-RdpGuardRuleSuffix {
@@ -1727,10 +1730,40 @@ function Protect-RdpGuardAddress {
 
 function Save-State {
   param([hashtable]$Bans, [hashtable]$Offenses)
-  $tempPath = "$statePath.tmp"
-  [ordered]@{ bans = $Bans; offenses = $Offenses } |
-    ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $tempPath -Encoding UTF8
-  Move-Item -LiteralPath $tempPath -Destination $statePath -Force
+  $tempPath = "$statePath.$PID.$([guid]::NewGuid().ToString('N')).tmp"
+  try {
+    $json = [ordered]@{ bans = $Bans; offenses = $Offenses } | ConvertTo-Json -Depth 5
+    # Validate the complete payload before replacing the last readable state.
+    # A unique temporary name also prevents a stale .tmp file from an
+    # interrupted older task from being mistaken for the current write.
+    $null = $json | ConvertFrom-Json
+    Set-Content -LiteralPath $tempPath -Value $json -Encoding UTF8
+    Move-Item -LiteralPath $tempPath -Destination $statePath -Force
+  } finally {
+    Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Test-RdpAuthenticationFailure {
+  param([Parameter(Mandatory)][hashtable]$Fields)
+
+  $logonType = ([string]$Fields['LogonType']).Trim()
+  if ($logonType -eq '10') { return $true }
+  if ($logonType -ne '3') { return $false }
+
+  # With NLA, a rejected credential can be audited before the interactive RDP
+  # session exists. On current Windows 11 builds that pre-authentication path
+  # can appear as type 3 / NtLmSsp with IpPort 0 instead of type 10. Do not
+  # accept ordinary type 3 traffic with a real source port; that would turn
+  # unrelated SMB/network authentication failures into RDP bans.
+  $logonProcess = ([string]$Fields['LogonProcessName']).Trim()
+  $authenticationPackage = ([string]$Fields['AuthenticationPackageName']).Trim()
+  $sourcePort = ([string]$Fields['IpPort']).Trim()
+  return (
+    $logonProcess -ieq 'NtLmSsp' -and
+    $authenticationPackage -in @('NTLM', 'Negotiate') -and
+    $sourcePort -eq '0'
+  )
 }
 
 $mutexAcquired = $false
@@ -1855,10 +1888,7 @@ try {
       $fields[$name] = [string]$field.InnerText
     }
 
-    # Only RemoteInteractive (10) identifies an RDP sign-in. Logon type 3 is
-    # a generic network sign-in (for example SMB), so counting it here can
-    # incorrectly ban a legitimate client from RDP.
-    if ($fields.LogonType -ne '10') { continue }
+    if (-not (Test-RdpAuthenticationFailure -Fields $fields)) { continue }
     $status = ([string]$fields.Status).ToLowerInvariant()
     $subStatus = ([string]$fields.SubStatus).ToLowerInvariant()
     $passwordFailure = @('0xc0000064', '0xc000006a', '0xc000006d')
@@ -1901,7 +1931,7 @@ try {
       offenseCount = $offenseCount
     }
     $banUntil = if ($isPermanent) { '永久' } else { $expires.ToString('o') }
-    Write-GuardLog "封禁：$address；失败次数：$($counts[$address])；30 天内第 $offenseCount 次；期限：$banUntil"
+    Write-GuardLog "封禁：$address；失败次数：$($counts[$address])；$offenseWindowDays 天内第 $offenseCount 次；期限：$banUntil"
     if (Test-Path -LiteralPath $notifierPath) {
       try {
         & $notifierPath `
@@ -1974,7 +2004,7 @@ function Install-RdpGuard {
     ) | Out-Null
     Invoke-NativeCommand -FilePath 'schtasks.exe' -ArgumentList @(
       '/Create', '/TN', $script:GuardCleanupTaskName,
-      '/SC', 'MINUTE', '/MO', '5',
+      '/SC', 'MINUTE', '/MO', '1',
       '/TR', $taskCommand,
       '/RU', 'SYSTEM', '/RL', 'HIGHEST', '/F'
     ) | Out-Null
